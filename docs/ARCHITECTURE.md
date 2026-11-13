@@ -60,7 +60,10 @@ where the current design leaves room for them.
 3. **`RenderContext`**: process-wide GPU state shared by every viewport. It holds the device,
    allocator, bindless table, pipeline layout, samplers, shaders, pipeline cache and built-in meshes.
 4. **`Renderer`**: frames in flight, recording, submission, presentation, capture.
-5. **`SceneRenderer`**: turns a `Scene` and a `CameraView` into render-graph passes.
+5. **`SceneRenderer`**: turns a `Scene` and a `CameraView` into render-graph passes. `build()`
+   runs its phases in order over one `SceneFrame` (`SceneRendererFrame.hpp`), one file each:
+   frame constants and lights, objects and draw lists, shadow passes, surface passes (prepass to
+   see-through), post-processing, overlays.
 
 ### Device requirements
 

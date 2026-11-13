@@ -141,7 +141,11 @@ struct Frustum {
     [[nodiscard]] bool intersectsAabb(const glm::vec3& center, const glm::vec3& extents) const;
 };
 
-/// Translates a Scene into render-graph passes: Sky -> Opaque (PBR forward) -> Grid -> Tonemap.
+struct SceneFrame;
+
+/// Translates a Scene into render-graph passes: shadows, depth prepass, sky, opaque (PBR forward),
+/// see-through surfaces, post-processing, tone mapping and overlays. build() runs the phases in
+/// order; each lives in its own file (see SceneRendererFrame.hpp).
 class SceneRenderer {
 public:
     explicit SceneRenderer(RenderContext& context);
@@ -154,6 +158,17 @@ public:
                          double timeSeconds);
 
 private:
+    // The phases of build(), in order.
+    void prepareFrame(SceneFrame& f);        // SceneRendererLights.cpp
+    void gatherObjects(SceneFrame& f);       // SceneRendererObjects.cpp
+    void selectVirtualPages(SceneFrame& f);  // SceneRendererObjects.cpp
+    void addShadowPasses(SceneFrame& f);     // SceneRendererShadows.cpp
+    void addDepthPasses(SceneFrame& f);      // SceneRendererSurfaces.cpp
+    void addSurfacePasses(SceneFrame& f);    // SceneRendererSurfaces.cpp
+    void addParticles(SceneFrame& f);        // SceneRendererPost.cpp
+    void addPostProcessing(SceneFrame& f);   // SceneRendererPost.cpp
+    void addOverlays(SceneFrame& f);         // SceneRendererOverlays.cpp
+
     /// What an imported mesh's material says about cut-out and two-sidedness (cached per key).
     struct ModelSurface {
         float alphaCutoff = 0.0f;

@@ -97,6 +97,12 @@ lumora_engine_module(renderer
         renderer/d3d12/D3D12Context.cpp
         renderer/Renderer.cpp
         renderer/SceneRenderer.cpp
+        renderer/SceneRendererLights.cpp
+        renderer/SceneRendererObjects.cpp
+        renderer/SceneRendererShadows.cpp
+        renderer/SceneRendererSurfaces.cpp
+        renderer/SceneRendererPost.cpp
+        renderer/SceneRendererOverlays.cpp
         renderer/Overlay.cpp
         renderer/Sprites.cpp
         renderer/VirtualShadowMap.cpp
