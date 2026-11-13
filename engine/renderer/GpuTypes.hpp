@@ -93,6 +93,7 @@ struct FrameConstants {
     glm::vec4 fogAlbedo{1.0f};              // rgb: share of the light the fog scatters
     glm::vec4 clouds{0.0f};                 // x coverage, y bottom (m), z thickness (m), w density
     glm::vec4 cloudWind{0.0f};              // xy how far the wind moved the clouds (m)
+    glm::vec4 outputSize{0.0f};             // w, h, 1/w, 1/h of the passes after TAA (= viewportSize unless upscaling)
     GpuLight lights[kMaxLights]{};
 };
 
@@ -153,9 +154,9 @@ static_assert(offsetof(FrameConstants, previousViewProjection) == 912 + 64 * kLo
 static_assert(offsetof(FrameConstants, probes) == 912 + 64 * kLocalShadowTiles + 64 + 96 + 80 + 16);
 static_assert(offsetof(FrameConstants, volumes) == 912 + 64 * kLocalShadowTiles + 64 + 96 + 80 + 16 + 64 * kMaxReflectionProbes + 16);
 static_assert(offsetof(FrameConstants, lights) ==
-              912 + 64 * kLocalShadowTiles + 64 + 96 + 80 + 16 + 64 * kMaxReflectionProbes + 16 + 64 * kMaxProbeVolumes + 80);
+              912 + 64 * kLocalShadowTiles + 64 + 96 + 80 + 16 + 64 * kMaxReflectionProbes + 16 + 64 * kMaxProbeVolumes + 96);
 static_assert(sizeof(FrameConstants) ==
-              912 + 64 * kLocalShadowTiles + 64 + 96 + 80 + 16 + 64 * kMaxReflectionProbes + 16 + 64 * kMaxProbeVolumes + 80 +
+              912 + 64 * kLocalShadowTiles + 64 + 96 + 80 + 16 + 64 * kMaxReflectionProbes + 16 + 64 * kMaxProbeVolumes + 96 +
                   64 * kMaxLights);
 static_assert(sizeof(GpuProbeVolume) == 64);
 static_assert(sizeof(GpuReflectionProbe) == 64);

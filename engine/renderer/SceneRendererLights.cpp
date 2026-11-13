@@ -63,7 +63,18 @@ void SceneRenderer::prepareFrame(SceneFrame& f) {
     const EnvironmentSettings& env = f.env;
     const CameraView& camera = f.camera;
     const RenderSettings& settings = f.settings;
-    const VkExtent2D extent = f.extent;
+    // TAA upscaling: everything up to TAA renders smaller (see RenderSettings::renderScale).
+    const VkExtent2D outputExtent = f.extent;
+    {
+        const bool upscale = settings.temporalAntiAliasing && taa_ && outputExtent.width >= 16 && outputExtent.height >= 16;
+        const float scale = upscale ? std::clamp(settings.renderScale, 0.5f, 1.0f) : 1.0f;
+        f.renderExtent = outputExtent;
+        if (scale < 0.999f) {
+            f.renderExtent.width = std::max(8u, static_cast<std::uint32_t>(std::lround(static_cast<float>(outputExtent.width) * scale)));
+            f.renderExtent.height = std::max(8u, static_cast<std::uint32_t>(std::lround(static_cast<float>(outputExtent.height) * scale)));
+        }
+    }
+    const VkExtent2D extent = f.renderExtent;
     const double timeSeconds = f.timeSeconds;
     FrameResources& frame = f.frame;
 
@@ -81,7 +92,10 @@ void SceneRenderer::prepareFrame(SceneFrame& f) {
     const glm::vec3 cameraForward = -glm::normalize(glm::vec3(glm::inverse(camera.view)[2]));
     glm::vec2 jitter(0.0f);
     if (temporal) {
-        jitter = halton23(taaFrame_ % 8 + 1) * glm::vec2(2.0f / static_cast<float>(extent.width), 2.0f / static_cast<float>(extent.height));
+        // More jitter positions when upscaling: an output pixel needs about 8 samples of its own.
+        const float density = static_cast<float>(outputExtent.width) / static_cast<float>(extent.width);
+        const auto phases = static_cast<std::uint64_t>(std::clamp(std::lround(8.0f * density * density), 8l, 32l));
+        jitter = halton23(taaFrame_ % phases + 1) * glm::vec2(2.0f / static_cast<float>(extent.width), 2.0f / static_cast<float>(extent.height));
         glm::mat4 projection = camera.projection;
         projection[2][0] -= jitter.x;  // clip.x / w gains jitter.x (w = -view z)
         projection[2][1] -= jitter.y;
@@ -89,8 +103,8 @@ void SceneRenderer::prepareFrame(SceneFrame& f) {
         fc.viewProjection = projection * camera.view;
         fc.inverseViewProjection = glm::inverse(fc.viewProjection);
         const bool cut = glm::distance(camera.position, previousCameraPosition_) > 5.0f ||
-                         glm::dot(cameraForward, previousCameraForward_) < 0.7f || extent.width != taaWidth_ ||
-                         extent.height != taaHeight_;
+                         glm::dot(cameraForward, previousCameraForward_) < 0.7f || outputExtent.width != taaWidth_ ||
+                         outputExtent.height != taaHeight_;
         if (cut) taaHistoryValid_ = false;
     } else {
         taaHistoryValid_ = false;
@@ -100,6 +114,8 @@ void SceneRenderer::prepareFrame(SceneFrame& f) {
     fc.cameraPositionTime = glm::vec4(camera.position, static_cast<float>(timeSeconds));
     fc.viewportSize = glm::vec4(static_cast<float>(extent.width), static_cast<float>(extent.height),
                                 1.0f / static_cast<float>(extent.width), 1.0f / static_cast<float>(extent.height));
+    fc.outputSize = glm::vec4(static_cast<float>(outputExtent.width), static_cast<float>(outputExtent.height),
+                              1.0f / static_cast<float>(outputExtent.width), 1.0f / static_cast<float>(outputExtent.height));
     fc.skyZenith = glm::vec4(env.skyZenithColor, env.ambientIntensity);
     fc.skyHorizon = glm::vec4(env.skyHorizonColor, env.exposure);
     fc.groundColor = glm::vec4(env.groundColor, 0.0f);

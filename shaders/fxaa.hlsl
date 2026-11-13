@@ -35,7 +35,7 @@ float4 output(float3 rgb) {
 }
 
 float4 PSMain(FullscreenOut input) : SV_Target0 {
-    float2 texel = gFrame.viewportSize.zw;
+    float2 texel = gFrame.outputSize.zw;
     float2 uv = input.uv;
     float4 center = tap(uv);
     float lumaM = center.a;

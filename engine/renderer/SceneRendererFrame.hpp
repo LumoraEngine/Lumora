@@ -109,7 +109,7 @@ struct SceneFrame {
     const RenderSettings& settings;
     RGImage output;
     nvrhi::Format outputFormat;
-    VkExtent2D extent;
+    VkExtent2D extent;  // the output; the post-processing after TAA runs at this size
     double timeSeconds;
     nvrhi::IDevice* gpu;
     const entt::registry& reg;
@@ -117,6 +117,7 @@ struct SceneFrame {
     SceneDrawStats stats{};
 
     // ---- prepareFrame
+    VkExtent2D renderExtent{};          // the scene's images up to TAA (smaller when TAA upscales)
     FrameConstants fc{};
     bool temporal = false;              // TAA this frame (jittered projection)
     glm::mat4 unjittered{1.0f};         // the view-projection without jitter

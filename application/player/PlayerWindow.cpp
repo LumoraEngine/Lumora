@@ -159,14 +159,17 @@ render::RenderSettings PlayerWindow::viewportSettings() const {
     s.assets = &assets_;
     s.hud = menu_.isOpen() ? &overlay_ : &simulation_->hud();
     // Graphics quality from the game's settings.
+    // Lower qualities also render smaller and let TAA upscale (TAAU).
     if (settings_.quality <= 0) {
         s.shadows = false;
         s.ambientOcclusion = false;
         s.bloom = false;
+        s.renderScale = 0.6f;
     } else if (settings_.quality == 1) {
         s.shadowResolution = 1024;
         s.shadowDistance = 35.0f;
         s.ambientOcclusion = false;
+        s.renderScale = 0.8f;
     }
     s.debug = showDebug_ ? &simulation_->debugDraw() : nullptr;
     return s;

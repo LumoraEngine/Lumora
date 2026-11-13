@@ -14,7 +14,7 @@ groupshared uint gBins[64];
 void CSMain(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex) {
     gBins[index] = 0u;
     GroupMemoryBarrierWithGroupSync();
-    const int2 size = int2(gFrame.viewportSize.xy);
+    const int2 size = int2(gFrame.outputSize.xy);  // after TAA
     const int2 p = int2(id.xy) * 2;
     if (all(p < size)) {
         float3 c = gTextures[gPush.index0].Load(int3(p, 0)).rgb;

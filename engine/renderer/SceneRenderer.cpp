@@ -501,8 +501,11 @@ SceneDrawStats SceneRenderer::build(RenderGraph& graph, FrameResources& frame, c
     selectVirtualPages(f);  // SceneRendererObjects.cpp
 
     // ---- Render graph ----------------------------------------------------------------------
-    f.hdr = graph.createImage("SceneColorHDR", {ctx_.hdrFormat(), extent.width, extent.height});
-    f.depth = graph.createImage("SceneDepth", {ctx_.depthFormat(), extent.width, extent.height});
+    const VkExtent2D render = f.renderExtent;  // up to TAA; the output's size after it
+    f.hdr = graph.createImage("SceneColorHDR", {ctx_.hdrFormat(), render.width, render.height});
+    f.depth = graph.createImage("SceneDepth", {ctx_.depthFormat(), render.width, render.height});
+    f.stats.renderWidth = render.width;
+    f.stats.renderHeight = render.height;
     f.stateFor = {frame.bindingSet(ctx_.gpu(), ctx_.frameLayout(), ctx_.samplers()), ctx_.bindless().table()};
     addShadowPasses(f);    // SceneRendererShadows.cpp
     addDepthPasses(f);     // SceneRendererSurfaces.cpp

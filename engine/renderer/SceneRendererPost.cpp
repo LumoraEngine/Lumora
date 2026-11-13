@@ -136,7 +136,8 @@ void SceneRenderer::addPostProcessing(SceneFrame& f) {
     const RenderSettings& settings = f.settings;
     RenderGraph& graph = f.graph;
     const DrawState stateFor = f.stateFor;
-    const VkExtent2D extent = f.extent;
+    const VkExtent2D extent = f.extent;              // after TAA
+    const VkExtent2D renderExtent = f.renderExtent;  // before it
     const double timeSeconds = f.timeSeconds;
     const FrameConstants& fc = f.fc;
     const bool temporal = f.temporal;
@@ -149,8 +150,8 @@ void SceneRenderer::addPostProcessing(SceneFrame& f) {
     // ---- Sun shafts (half resolution, added onto the HDR image), then depth of field.
     const std::uint32_t linearSampler = ctx_.linearClampSampler();
     if (fc.sunShafts.z > 0.0f && fc.sunShafts.w > 0.0f) {
-        const RGImage shaftsImage = graph.createImage("SunShafts", {ctx_.hdrFormat(), std::max(extent.width / 2, 1u),
-                                                                    std::max(extent.height / 2, 1u)});
+        const RGImage shaftsImage = graph.createImage("SunShafts", {ctx_.hdrFormat(), std::max(renderExtent.width / 2, 1u),
+                                                                    std::max(renderExtent.height / 2, 1u)});
         graph.addRasterPass(
             "SunShafts",
             [&](PassBuilder& b) {
@@ -215,7 +216,8 @@ void SceneRenderer::addPostProcessing(SceneFrame& f) {
                 b.sample(motion);
                 b.sample(previousHistory);
             },
-            [this, hdr, depth, motion, previousHistory, historyValid, bindlessTable, extent](PassContext& ctx) {
+            [this, hdr, depth, motion, previousHistory, historyValid, bindlessTable, extent,
+             upscale = renderExtent.width != extent.width || renderExtent.height != extent.height](PassContext& ctx) {
                 nvrhi::ComputeState state;
                 state.pipeline = taa_;
                 state.bindings = {ctx.frameBindings(), bindlessTable, ctx.storageBindings()};
@@ -226,7 +228,7 @@ void SceneRenderer::addPostProcessing(SceneFrame& f) {
                 pc.index2 = ctx.bindlessIndex(motion);
                 pc.param0 = std::bit_cast<float>(ctx.bindlessIndex(previousHistory));
                 pc.param1 = 0.1f;  // weight of the new frame: about the last 10 frames are averaged
-                pc.flags = historyValid ? 1u : 0u;
+                pc.flags = (historyValid ? 1u : 0u) | (upscale ? 2u : 0u);
                 push(ctx.cmd, pc);
                 ctx.cmd->dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
             });

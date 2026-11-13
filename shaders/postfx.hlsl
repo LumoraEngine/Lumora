@@ -38,7 +38,7 @@ float4 PSDepthOfField(FullscreenOut input) : SV_Target0 {
     float3 sum = gTextures[gPush.index0].SampleLevel(smp, input.uv, 0.0).rgb;
     float weight = 1.0;
     if (coc > 0.5) {
-        float2 texel = gFrame.viewportSize.zw;
+        float2 texel = gFrame.outputSize.zw;  // after TAA: the output's pixels
         for (int i = 0; i < 24; ++i) {
             float2 uv = input.uv + kDisk[i] * coc * texel;
             float sampleDepth = gTextures[gPush.index1].SampleLevel(smp, uv, 0.0).r;

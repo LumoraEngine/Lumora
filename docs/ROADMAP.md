@@ -44,10 +44,15 @@ Warunek dla kompresji tekstur (1.7).
 
 ## Faza 1: obraz
 
-### 1.1 TAA (M): zrobione (bez upscalingu)
+### 1.1 TAA (M): zrobione, z upscalingiem (TAAU)
 - **Jak:** jitter projekcji (Halton 2,3), historia jako obraz trwały (jak pula VSM), odrzucanie
   przez przycięcie do sąsiedztwa w YCoCg, wyostrzenie; przebieg między cząsteczkami a DoF.
-  FXAA zostaje jako opcja „szybka”. Później: upscaling (render 67%, TAAU).
+  FXAA zostaje jako opcja „szybka”.
+- **TAAU:** `RenderSettings::renderScale` (0,5-1): scena do TAA w mniejszej rozdzielczości, TAA
+  składa piksel wyjścia z próbek wokół niego (Gauss odległości), więcej faz jittera (do 32);
+  po TAA (DoF, rozmycie ruchu, ekspozycja, bloom, FXAA, HUD) w rozdzielczości wyjścia
+  (`FrameConstants::outputSize`). Edytor: View > Viewport Resolution; gracz: jakość Low 60%,
+  Medium 80%.
 - **Skutek:** koniec migotania liści, cienkich krawędzi i ikon; gładkie wycięcia alfy.
 - **Sprawdzenie:** render statycznej sceny w N klatkach zbiega się do obrazu supersamplingu;
   test duchów: obiekt w ruchu nie zostawia smugi > 2 px.

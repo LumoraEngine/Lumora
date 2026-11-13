@@ -109,7 +109,7 @@ right-click → *Back to Dock*) returns it; <kbd>Ctrl</kbd>+<kbd>1</kbd> shows t
 
 | Panel | Use |
 |---|---|
-| Viewport | The scene as the engine renders it; selection, gizmos, camera. Lights, cameras, sounds and particle emitters show a floating icon (click it to select; *View → Show Scene Icons* or <kbd>Shift</kbd>+<kbd>G</kbd> hides them). A selected light shows its range or cone |
+| Viewport | The scene as the engine renders it; selection, gizmos, camera. Lights, cameras, sounds and particle emitters show a floating icon (click it to select; *View → Show Scene Icons* or <kbd>Shift</kbd>+<kbd>G</kbd> hides them). A selected light shows its range or cone. *View → Viewport Resolution* below 100% renders the scene smaller and lets TAA upscale it (faster on weak GPUs; it sharpens over a few frames) |
 | Hierarchy | All entities as a tree. Drag to re-parent; right-click to create, rename, duplicate or delete; filter at the top |
 | Inspector | Components of the selected entity. With nothing selected it shows the scene environment |
 | Content Browser | The whole project as folders, with previews of images, models, prefabs and materials and a labelled icon for every other file type. Double-click to open folders, scenes, models, prefabs and scripts; *New* creates folders, scenes, behaviours and prefabs; *Import* or drop files to bring them in; right-click to rename, duplicate or delete (to the trash) |
@@ -522,7 +522,8 @@ The language starts as the player's choice or the system's; `setLanguage("pl")`,
 **Game menu.** In the player, <kbd>Esc</kbd> opens a built-in pause menu (Resume, Settings,
 Quit) when the game's behaviours do not handle Escape themselves; they can open it with
 `openGameMenu()`, or its settings page with `openGameSettings()` (a main menu's "Options").
-Settings: volume, graphics quality (Low, Medium, High), fullscreen, vsync and language; they are
+Settings: volume, graphics quality (Low, Medium, High; Low renders at 60% and Medium at 80% of the
+screen's resolution and upscales with TAA), fullscreen, vsync and language; they are
 kept per game in the player's data folder. The menu's own texts can be translated too (keys
 `menu.paused`, `menu.resume`, `menu.settings`, `menu.quit`, `menu.volume`, `menu.quality`,
 `menu.quality.low/medium/high`, `menu.fullscreen`, `menu.vsync`, `menu.language`, `menu.back`).

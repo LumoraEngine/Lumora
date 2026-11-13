@@ -1634,6 +1634,60 @@ TEST_F(RendererTest, TemporalAntiAliasingLeavesNoTrailBehindMovingObjects) {
     EXPECT_LT(pixel(*frame, static_cast<std::uint32_t>(std::clamp(now.x, 0, 95)), 48).g, 60);
 }
 
+TEST_F(RendererTest, TemporalUpscalingRendersSmallerAndConvergesToTheNativeImage) {
+    auto scene = edgeScene();
+    FlyCameraController cam;
+    cam.setPosition({0.0f, 0.0f, 3.0f});
+    cam.lookAt({0.0f, 0.0f, 0.0f});
+    const CameraView view = cam.view(1.0f);
+    RenderSettings native;
+    native.antiAliasing = false;
+    native.bloom = false;
+    native.shadows = false;
+    native.temporalAntiAliasing = true;
+    auto aliased = renderer_->capture(*scene, view, {96, 96}, [&] {
+        RenderSettings plain = native;
+        plain.temporalAntiAliasing = false;
+        return plain;
+    }());
+    ASSERT_TRUE(aliased.has_value());
+    std::optional<CapturedImage> reference;
+    for (int i = 0; i < 32; ++i) {
+        auto f = renderer_->capture(*scene, view, {96, 96}, native);
+        ASSERT_TRUE(f.has_value());
+        reference = std::move(*f);
+    }
+    EXPECT_EQ(renderer_->stats().scene.renderWidth, 96u);
+
+    RenderSettings upscaled = native;
+    upscaled.renderScale = 0.5f;
+    std::optional<CapturedImage> frame;
+    for (int i = 0; i < 48; ++i) {
+        auto f = renderer_->capture(*scene, view, {96, 96}, upscaled);
+        ASSERT_TRUE(f.has_value());
+        frame = std::move(*f);
+    }
+    EXPECT_TRUE(renderer_->stats().scene.temporalAntiAliasing);
+    EXPECT_EQ(renderer_->stats().scene.renderWidth, 48u) << "a quarter of the pixels shaded";
+    EXPECT_EQ(renderer_->stats().scene.renderHeight, 48u);
+    ASSERT_EQ(frame->width, 96u);
+    ASSERT_EQ(frame->height, 96u);
+    double difference = 0.0;
+    for (std::size_t i = 0; i < frame->rgba.size(); i += 4) {
+        for (int c = 0; c < 3; ++c) difference += std::abs(frame->rgba[i + c] - reference->rgba[i + c]);
+    }
+    difference /= static_cast<double>(frame->rgba.size() / 4 * 3);
+    EXPECT_LT(difference, 4.0) << "the upscaled image matches the native one but for detail at the edges";
+    EXPECT_GT(partialPixels(*frame), partialPixels(*aliased) + 40) << "edges are still anti-aliased";
+
+    // Settled: no crawling from the sparser samples.
+    auto next = renderer_->capture(*scene, view, {96, 96}, upscaled);
+    ASSERT_TRUE(next.has_value());
+    int changed = 0;
+    for (std::size_t i = 0; i < next->rgba.size(); i += 4) changed += std::abs(next->rgba[i + 1] - frame->rgba[i + 1]) > 24 ? 1 : 0;
+    EXPECT_LT(changed, 20);
+}
+
 TEST_F(RendererTest, BlockCompressedTexturesUploadRowsOfBlocks) {
     // A 8 x 8 BC1 texture: 2 x 2 blocks of 8 bytes, every block solid red (colour0 = colour1 = red).
     std::vector<std::byte> level(4 * 8);
@@ -2211,7 +2265,9 @@ TEST(TextureCooking, FindsEveryUseAndCooksItOnce) {
         ASSERT_TRUE(cooked.has_value()) << use.key << ": " << cooked.error().message;
         const bool model = use.key.find('#') != std::string::npos;  // an opaque green picture
         EXPECT_EQ(cooked->format, textureFormat(use.kind, !model, true)) << use.key;
-        if (!model) EXPECT_EQ(cooked->width, 32u);
+        if (!model) {
+            EXPECT_EQ(cooked->width, 32u);
+        }
     }
     EXPECT_FALSE(cookTextures({project, dir.path() / "Cancelled", [](auto...) { return false; }}).has_value()) << "cancelled";
 }

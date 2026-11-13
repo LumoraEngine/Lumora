@@ -40,7 +40,7 @@ struct FrameData {
     column_major float4x4 viewProjection;
     column_major float4x4 inverseViewProjection;
     float4 cameraPositionTime;  // xyz camera, w seconds
-    float4 viewportSize;        // w, h, 1/w, 1/h
+    float4 viewportSize;        // w, h, 1/w, 1/h of the scene's images (smaller than outputSize when TAA upscales)
     float4 skyZenith;           // rgb, w ambient intensity
     float4 skyHorizon;          // rgb, w exposure
     float4 groundColor;         // rgb
@@ -76,6 +76,7 @@ struct FrameData {
     float4 fogAlbedo;           // rgb: share of the light the fog scatters
     float4 clouds;              // x coverage, y bottom (m), z thickness (m), w density
     float4 cloudWind;           // xy how far the wind moved the clouds (m)
+    float4 outputSize;          // w, h, 1/w, 1/h after TAA (= viewportSize unless TAA upscales the frame)
     GpuLight lights[MAX_LIGHTS];  // directional lights
 };
 

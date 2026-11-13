@@ -661,6 +661,26 @@ void EditorWindow::buildMenus() {
     for (QDockWidget* dock : findChildren<QDockWidget*>()) view->addAction(dock->toggleViewAction());
     view->addSeparator();
     view->addActions({grid_, icons_, vsync_});
+    // Viewport resolution: below 100% the scene renders smaller and TAA upscales it (faster on
+    // weak GPUs, sharpens over a few frames). Remembered per user.
+    QMenu* resolution = view->addMenu(tr("Viewport Resolution"));
+    auto* resolutions = new QActionGroup(resolution);
+    const double savedScale = QSettings().value(QStringLiteral("viewport/renderScale"), 1.0).toDouble();
+    for (const int percent : {100, 85, 67, 50}) {
+        QAction* action = resolution->addAction(percent == 100 ? tr("100% (native)") : tr("%1% (upscaled)").arg(percent));
+        action->setCheckable(true);
+        resolutions->addAction(action);
+        const float scale = static_cast<float>(percent) / 100.0f;
+        if (std::abs(savedScale - scale) < 0.01) {
+            action->setChecked(true);
+            client_->renderScale = scale;
+        }
+        connect(action, &QAction::triggered, this, [this, scale] {
+            client_->renderScale = scale;
+            QSettings().setValue(QStringLiteral("viewport/renderScale"), static_cast<double>(scale));
+        });
+    }
+    if (resolutions->checkedAction() == nullptr) resolutions->actions().front()->setChecked(true);
     view->addSeparator();
     QMenu* mainArea = view->addMenu(app::theme::icon(QStringLiteral("scene")), tr("Main Area"));
     for (QDockWidget* dock : findChildren<QDockWidget*>()) {

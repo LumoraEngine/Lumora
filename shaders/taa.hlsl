@@ -8,11 +8,15 @@
 //    YCoCg, so what was revealed or changed does not leave ghosts.
 //  - Blending in a luminance-weighted space (Karis), which stops bright pixels from flickering.
 //  - The history is read with a 5-tap Catmull-Rom filter, which keeps it sharp under motion.
+//  - Upscaling (TAAU, flags bit1): the frame is smaller than the history (gFrame.viewportSize vs
+//    outputSize). Each output pixel rebuilds the current colour from the jittered samples near
+//    it (a Gaussian of their distance), and takes less of it where none fell close this frame;
+//    over the jitter sequence every output pixel gets samples of its own.
 //
 // gPush: index0 = current HDR colour, index1 = depth, index2 = motion (bindless),
 //        param0 = asfloat(history index), param1 = weight of the current frame,
-//        flags bit0 = the history is valid.
-// Output (set 1, u0): the new history, which the frame's post-processing then reads.
+//        flags bit0 = the history is valid, bit1 = upscaling.
+// Output (set 1, u0): the new history (output size), which the frame's post-processing then reads.
 #define LUMORA_COMPUTE 1
 #include "common.hlsli"
 
@@ -52,29 +56,43 @@ float3 sampleHistory(uint history, float2 uv, float2 size) {
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
-    const int2 size = int2(gFrame.viewportSize.xy);
+    const int2 size = int2(gFrame.outputSize.xy);        // the history
+    const int2 renderSize = int2(gFrame.viewportSize.xy);  // this frame (smaller when upscaling)
     const int2 p = int2(id.xy);
     if (any(p >= size)) {
         return;
     }
+    const bool upscale = (gPush.flags & 2u) != 0u;
     Texture2D current = gTextures[gPush.index0];
     Texture2D depth = gTextures[gPush.index1];
     Texture2D motion = gTextures[gPush.index2];
+    float2 uv = (float2(p) + 0.5) * gFrame.outputSize.zw;
+    // Where this frame shows what lies at uv (it was rendered jittered), in its own pixels.
+    const float2 renderPos = (uv + gFrame.jitter.xy * 0.5) * gFrame.viewportSize.xy - 0.5;
+    const int2 c0 = upscale ? clamp(int2(floor(renderPos + 0.5)), int2(0, 0), renderSize - 1) : p;
 
     // Neighbourhood statistics (YCoCg of the weighted colour) and the nearest surface.
     float3 m1 = 0.0, m2 = 0.0;
     float3 centre = 0.0;
+    float3 rebuilt = 0.0;  // upscaling: the samples near this pixel, weighted by distance
+    float rebuiltWeight = 0.0;
+    float closest = 0.0;   // ... and the weight of the closest one
     float nearest = -1.0;
-    int2 nearestAt = p;
+    int2 nearestAt = c0;
     [unroll] for (int y = -1; y <= 1; ++y) {
         [unroll] for (int x = -1; x <= 1; ++x) {
-            int2 q = clamp(p + int2(x, y), int2(0, 0), size - 1);
+            int2 q = clamp(c0 + int2(x, y), int2(0, 0), renderSize - 1);
             float3 c = toYCoCg(weightIn(current.Load(int3(q, 0)).rgb));
             m1 += c;
             m2 += c * c;
             if (x == 0 && y == 0) {
                 centre = c;
             }
+            float2 offset = float2(q) - renderPos;
+            float w = exp(-2.29 * dot(offset, offset));
+            rebuilt += c * w;
+            rebuiltWeight += w;
+            closest = max(closest, w);
             float d = depth.Load(int3(q, 0)).r;  // reversed-Z: larger is nearer
             if (d > nearest) {
                 nearest = d;
@@ -84,9 +102,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     }
     float3 mean = m1 / 9.0;
     float3 sigma = sqrt(max(m2 / 9.0 - mean * mean, 0.0));
+    if (upscale) {
+        centre = rebuilt / max(rebuiltWeight, 1e-5);
+    }
 
     // Where this pixel was last frame.
-    float2 uv = (float2(p) + 0.5) * gFrame.viewportSize.zw;
     float2 velocity;
     if (nearest <= 0.0) {
         // Sky: only the camera moved.
@@ -102,7 +122,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float3 result = centre;
     bool valid = (gPush.flags & 1u) != 0u && all(previousUv > 0.0) && all(previousUv < 1.0);
     if (valid) {
-        float3 history = toYCoCg(weightIn(sampleHistory(asuint(gPush.param0), previousUv, gFrame.viewportSize.xy)));
+        float3 history = toYCoCg(weightIn(sampleHistory(asuint(gPush.param0), previousUv, gFrame.outputSize.xy)));
         // Variance clipping: towards the box centre until the history fits.
         float3 extent = sigma * 1.25 + 1e-4;
         float3 offset = history - mean;
@@ -112,8 +132,11 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
             history = mean + offset / outside;
         }
         // Fast motion trusts the current frame more (the history is blurred by resampling).
-        float speed = length(velocity * gFrame.viewportSize.xy * 0.5);
+        float speed = length(velocity * gFrame.outputSize.xy * 0.5);
         float weight = lerp(gPush.param1, 0.35, saturate(speed / 32.0));
+        if (upscale) {
+            weight = saturate(weight * closest * 2.0);  // little of this frame where its samples fell far
+        }
         result = lerp(history, centre, weight);
     }
     gHistoryOut[p] = float4(weightOut(fromYCoCg(result)), 1.0);

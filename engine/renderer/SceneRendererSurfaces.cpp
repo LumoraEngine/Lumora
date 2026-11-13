@@ -44,7 +44,7 @@ void SceneRenderer::addDepthPasses(SceneFrame& f) {
     const RenderSettings& settings = f.settings;
     RenderGraph& graph = f.graph;
     const DrawState stateFor = f.stateFor;
-    const VkExtent2D extent = f.extent;
+    const VkExtent2D extent = f.renderExtent;
     const FrameConstants& fc = f.fc;
     const std::vector<Draw>& draws = f.draws;
     const RGImage depth = f.depth;
@@ -277,7 +277,7 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
     const RenderSettings& settings = f.settings;
     RenderGraph& graph = f.graph;
     const DrawState stateFor = f.stateFor;
-    const VkExtent2D extent = f.extent;
+    const VkExtent2D extent = f.renderExtent;
     std::vector<Draw>& draws = f.draws;  // moved into the opaque pass
     RGImage& hdr = f.hdr;
     const RGImage depth = f.depth;

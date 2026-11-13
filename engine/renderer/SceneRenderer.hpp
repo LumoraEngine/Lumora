@@ -74,6 +74,9 @@ struct RenderSettings {
     /// image. Needs consecutive frames of one view, so viewports turn it on; single captures
     /// (thumbnails, headless renders) leave it off.
     bool temporalAntiAliasing = false;
+    /// With TAA: the scene renders at this fraction of the output's width and height and TAA
+    /// upscales it (TAAU), filling in detail over the jittered frames. 0.5 .. 1; 1 = native.
+    float renderScale = 1.0f;
     /// Screen-space reflections on glossy opaque surfaces (the scene on screen replaces the
     /// environment where the reflected ray finds it). Glossy rather than mirror-only with TAA.
     bool screenSpaceReflections = false;
@@ -105,6 +108,8 @@ struct SceneDrawStats {
     bool shadowsRendered = false;
     bool virtualShadows = false;              // the sun used the virtual shadow map
     bool temporalAntiAliasing = false;        // TAA resolved the frame (with history when valid)
+    std::uint32_t renderWidth = 0;            // the scene's images before TAA (smaller when it upscales)
+    std::uint32_t renderHeight = 0;
     bool screenSpaceReflections = false;
     std::uint32_t reflectionProbes = 0;       // baked probes the frame used
     std::uint32_t lightProbeVolumes = 0;      // baked light probe volumes the frame used
