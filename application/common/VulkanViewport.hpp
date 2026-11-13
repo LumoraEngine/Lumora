@@ -24,6 +24,8 @@ class Scene;
 
 namespace lumora::render {
 class PresentTarget;
+class SnapshotPool;
+enum class FrameResult;
 }
 
 class QWidget;
@@ -81,6 +83,10 @@ public:
 /// Native Vulkan surface (QWindow) driven by the shared Renderer. Embed into widget UIs with
 /// QWidget::createWindowContainer. Renders continuously while exposed; owns its swapchain and
 /// releases it before Qt destroys the underlying platform surface.
+///
+/// Each frame the UI thread ticks the client and takes a snapshot of what it shows; the
+/// application's RenderThread draws and presents it while the UI thread goes on (with
+/// LUMORA_RENDER_THREAD=0, rendering happens on the UI thread instead).
 class LUMORA_APPCOMMON_API VulkanViewport final : public QWindow {
     Q_OBJECT
 public:
@@ -120,6 +126,8 @@ protected:
 
 private:
     void renderFrame();
+    /// A frame the render thread finished (back on the UI thread).
+    void frameDone(render::FrameResult result, const QString& error, bool deviceLost);
     void scheduleNextFrame();
     [[nodiscard]] rhi::PresentPolicy policy() const noexcept;
     bool ensureTarget();
@@ -144,7 +152,9 @@ private:
     QTimer pointerDrain_;                               // keeps its private event queue drained
     InputState input_;
     std::unique_ptr<GamepadReader> gamepad_ = std::make_unique<GamepadReader>();
+    std::unique_ptr<render::SnapshotPool> snapshots_;
     QElapsedTimer frameTimer_;
+    QElapsedTimer presentTimer_;  // between frames the render thread finished
     QElapsedTimer paceTimer_;
     QPointF lastMouse_;
     QPointF pressPos_;

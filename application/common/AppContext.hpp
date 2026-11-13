@@ -13,6 +13,7 @@ class QVulkanInstance;
 namespace lumora::render {
 class RenderContext;
 class Renderer;
+class RenderThread;
 }
 
 namespace lumora::app {
@@ -34,6 +35,8 @@ public:
     /// Returns nullptr (and the reason in rendererError()) if Vulkan cannot be initialised.
     [[nodiscard]] render::Renderer* renderer();
     [[nodiscard]] render::RenderContext* renderContext();
+    /// The thread viewports render on (null with LUMORA_RENDER_THREAD=0 or without a renderer).
+    [[nodiscard]] render::RenderThread* renderThread();
     [[nodiscard]] QVulkanInstance* vulkanInstance();
     [[nodiscard]] const QString& rendererError() const noexcept { return rendererError_; }
     [[nodiscard]] bool validationEnabled() const noexcept;
@@ -53,6 +56,7 @@ private:
     std::unique_ptr<render::RenderContext> renderContext_;
     std::unique_ptr<render::Renderer> renderer_;
     std::unique_ptr<QVulkanInstance> qvk_;  // adopts renderContext_'s VkInstance; destroyed first
+    std::unique_ptr<render::RenderThread> renderThread_;  // stopped before the renderer goes
     bool initAttempted_ = false;
     QString rendererError_;
 };

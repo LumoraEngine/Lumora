@@ -318,7 +318,8 @@ Platforma w `GameExporter` i oknie eksportu, Build Support „Web” w Hubie, za
 
 ## Faza 5: jakość i ulepszenia przekrojowe
 
-- **Wydajność:** profiler Tracy, wątek renderowania, culling na GPU, meshlety, budżety klatki.
+- **Wydajność:** wątek renderowania z migawką sceny (zrobione), profiler Tracy, culling na GPU,
+  meshlety, budżety klatki.
 - **Edytor:** wyszukiwanie zasobów, podgląd materiałów, prefaby zagnieżdżone, wieloscenowość.
 - **Stabilność:** testy wizualne (porównanie obrazów z wzorcami), testy na obu platformach przy
   każdym PR, zrzuty awarii.

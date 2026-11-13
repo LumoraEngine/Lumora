@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace lumora::render {
@@ -94,7 +95,12 @@ public:
     [[nodiscard]] Result<HdrImage> captureHdr(const Scene& scene, const CameraView& camera, VkExtent2D extent,
                                               RenderSettings settings);
 
-    [[nodiscard]] const FrameStats& stats() const noexcept { return stats_; }
+    /// The last frame's statistics (a copy: the render thread may be writing the next ones).
+    [[nodiscard]] FrameStats stats() const;
+    /// Held while a frame records, submits and presents (render, capture, ...): calls from another
+    /// thread wait for the frame in progress. Take it to touch what frames use, such as the
+    /// context's caches or the asset library they read (invalidating files, forgetting failures).
+    [[nodiscard]] std::unique_lock<std::recursive_mutex> lock() const { return std::unique_lock(mutex_); }
     [[nodiscard]] RenderContext& context() noexcept { return ctx_; }
     void waitIdle();
     /// A file changed on disk: drops the GPU meshes and textures made from it (they upload
@@ -112,6 +118,7 @@ private:
     void finish(FrameResources& frame);
     void advance() noexcept;
 
+    mutable std::recursive_mutex mutex_;  // see lock()
     RenderContext& ctx_;
     SceneRenderer sceneRenderer_;
     FramebufferCache framebuffers_;

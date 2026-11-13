@@ -1688,6 +1688,97 @@ TEST_F(RendererTest, TemporalUpscalingRendersSmallerAndConvergesToTheNativeImage
     EXPECT_LT(changed, 20);
 }
 
+#include "project/Project.hpp"
+#include "renderer/RenderThread.hpp"
+#include "scene/SceneSerializer.hpp"
+
+#include <atomic>
+#include <thread>
+
+TEST(RenderThread, RunsLatestWorkPerKeyAndForgetWaits) {
+    RenderThread thread;
+    std::atomic<bool> release{false};
+    std::atomic<int> ran{0};
+    std::atomic<int> lastValue{0};
+    int keyA = 0, keyB = 0;
+    std::atomic<bool> running{false};
+    thread.post(&keyA, [&] {
+        running = true;
+        while (!release.load()) std::this_thread::yield();
+        ++ran;
+    });
+    while (!running.load()) std::this_thread::yield();
+    // While A runs, newer work of A replaces older work that has not started.
+    for (int i = 1; i <= 5; ++i) {
+        thread.post(&keyA, [&, i] {
+            lastValue = i;
+            ++ran;
+        });
+    }
+    thread.post(&keyB, [&] { ++ran; });
+    EXPECT_FALSE(thread.idle(&keyA));
+    release = true;
+    thread.forget(&keyB);  // B may or may not have run, but it no longer runs or waits
+    while (!thread.idle(&keyA)) std::this_thread::yield();
+    EXPECT_EQ(lastValue.load(), 5) << "only the latest frame of a key";
+    EXPECT_GE(ran.load(), 2);
+    EXPECT_LE(ran.load(), 3);
+    // forget() waits for the work in progress.
+    std::atomic<bool> started{false};
+    std::atomic<bool> finished{false};
+    thread.post(&keyA, [&] {
+        started = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        finished = true;
+    });
+    while (!started.load()) std::this_thread::yield();
+    thread.forget(&keyA);
+    EXPECT_TRUE(finished.load());
+    EXPECT_TRUE(thread.idle(&keyA));
+}
+
+TEST_F(RendererTest, SnapshotsRenderLikeTheLiveSceneWhileItChanges) {
+    test::TempDir dir;
+    auto project = Project::create(dir.path() / "Show", "Show", ProjectTemplate::MaterialShowcase);
+    ASSERT_TRUE(project.has_value()) << project.error().message;
+    auto scene = SceneSerializer::load(project->defaultScenePath());
+    ASSERT_TRUE(scene.has_value()) << scene.error().message;
+    (*scene)->updateWorldTransforms();
+    AssetLibrary assets(project->rootDir());
+    FlyCameraController cam;
+    cam.setPosition({0.0f, 3.0f, 9.0f});
+    cam.lookAt({0.0f, 0.5f, 0.0f});
+    const CameraView view = cam.view(4.0f / 3.0f);
+    RenderSettings settings;
+    settings.assets = &assets;
+    settings.blockOnAssets = true;
+    settings.virtualShadows = false;  // cached pages would make the two frames' shadows differ
+    auto live = renderer_->capture(**scene, view, {160, 120}, settings);
+    ASSERT_TRUE(live.has_value());
+
+    RenderSnapshot snapshot;
+    snapshot.capture(**scene, view, settings);
+    // The live scene goes on changing while the snapshot renders on the render thread.
+    RenderThread thread;
+    std::optional<Result<CapturedImage>> rendered;
+    int key = 0;
+    thread.post(&key, [&] { rendered = renderer_->capture(snapshot.scene, snapshot.camera, {160, 120}, snapshot.settings); });
+    for (int i = 0; i < 200 && !thread.idle(&key); ++i) {
+        const entt::entity e = (*scene)->createEntity("Churn");
+        (*scene)->registry().emplace<MeshRendererComponent>(e);
+        (*scene)->registry().get<TransformComponent>(e).position = glm::vec3(static_cast<float>(i % 7), 0.0f, 0.0f);
+        (*scene)->updateWorldTransforms();
+        if (i % 3 == 0) (*scene)->destroyEntity(e);
+    }
+    thread.forget(&key);
+    ASSERT_TRUE(rendered.has_value() && rendered->has_value());
+    const CapturedImage& fromSnapshot = **rendered;
+    ASSERT_EQ(fromSnapshot.rgba.size(), live->rgba.size());
+    int different = 0;
+    for (std::size_t i = 0; i < live->rgba.size(); ++i) different += std::abs(live->rgba[i] - fromSnapshot.rgba[i]) > 2 ? 1 : 0;
+    EXPECT_LT(different, 20) << "the snapshot holds everything the renderer reads";
+}
+
 TEST_F(RendererTest, BlockCompressedTexturesUploadRowsOfBlocks) {
     // A 8 x 8 BC1 texture: 2 x 2 blocks of 8 bytes, every block solid red (colour0 = colour1 = red).
     std::vector<std::byte> level(4 * 8);

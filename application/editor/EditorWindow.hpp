@@ -5,6 +5,7 @@
 #include "editor/EditorContext.hpp"
 #include "assets/AssetLibrary.hpp"
 #include "project/Project.hpp"
+#include "renderer/Renderer.hpp"
 
 #include <QFileSystemWatcher>
 #include <QHash>
@@ -198,6 +199,7 @@ private:
     QStackedWidget* viewportStack_ = nullptr;
     QLabel* viewportError_ = nullptr;
     ProfilerPanel* profiler_ = nullptr;
+    render::FrameStats profilerStats_;  // the profiler's copy of the last frame's statistics
     class TimelinePanel* timeline_ = nullptr;
     QDockWidget* timelineDock_ = nullptr;
     class GraphEditorPanel* graph_ = nullptr;

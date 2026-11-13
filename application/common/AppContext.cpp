@@ -4,6 +4,7 @@
 #include "core/Log.hpp"
 #include "renderer/RenderContext.hpp"
 #include "renderer/Renderer.hpp"
+#include "renderer/RenderThread.hpp"
 
 #include <QVulkanInstance>
 
@@ -37,6 +38,7 @@ AppContext::AppContext(AppOptions options)
 }
 
 AppContext::~AppContext() {
+    renderThread_.reset();
     qvk_.reset();
     renderer_.reset();
     renderContext_.reset();
@@ -95,6 +97,12 @@ bool AppContext::initRenderer() {
 render::Renderer* AppContext::renderer() { return initRenderer() ? renderer_.get() : nullptr; }
 
 render::RenderContext* AppContext::renderContext() { return initRenderer() ? renderContext_.get() : nullptr; }
+
+render::RenderThread* AppContext::renderThread() {
+    if (!initRenderer()) return nullptr;
+    if (!renderThread_ && render::RenderThread::enabledByEnvironment()) renderThread_ = std::make_unique<render::RenderThread>();
+    return renderThread_.get();
+}
 
 QVulkanInstance* AppContext::vulkanInstance() { return initRenderer() ? qvk_.get() : nullptr; }
 

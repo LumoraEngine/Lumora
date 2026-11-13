@@ -529,7 +529,9 @@ void EditorWindow::buildDocks() {
     connect(code_, &CodeEditorPanel::placementToggled, this, [this] { setCodeInMainArea(!codeInMainArea()); });
     profiler_ = new ProfilerPanel(app_.renderContext(), [this]() -> const render::FrameStats* {
         render::Renderer* r = app_.renderer();
-        return r ? &r->stats() : nullptr;
+        if (r == nullptr) return nullptr;
+        profilerStats_ = r->stats();  // a copy: the render thread writes the next frame's
+        return &profilerStats_;
     });
     auto* profilerDock = makeDock(this, tr("Profiler"), QStringLiteral("dock.profiler"), QStringLiteral("chart"), profiler_);
 
@@ -1280,8 +1282,12 @@ int EditorWindow::reloadChangedIn(const QString& dir) {
         fileStamps_.insert(path, stamp);
         if (!changed) continue;
         const std::filesystem::path file = app::toPath(path);
+        // Not while a frame uses what the file gave (the render thread reads the library).
+        render::Renderer* frames = app_.renderer();
+        std::unique_lock<std::recursive_mutex> held;
+        if (frames != nullptr) held = frames->lock();
         if (assets_.invalidateFile(file) > 0) {
-            if (render::Renderer* renderer = app_.renderer()) renderer->invalidateAssetFile(file);
+            if (frames != nullptr) frames->invalidateAssetFile(file);
             log::info("Editor", "reloaded {}", project_.relativePath(file));
             ++reloaded;
         }
@@ -1885,6 +1891,9 @@ void EditorWindow::beginSession(bool hosting, const QString& publicAddress, cons
         updateRemoteMarkers();
     });
     connect(collabSession_.get(), &collab::CollabSession::assetsArrived, this, [this] {
+        render::Renderer* renderer = app_.renderer();
+        std::unique_lock<std::recursive_mutex> held;
+        if (renderer != nullptr) held = renderer->lock();  // the render thread uses these caches
         assets_.forgetFailures();
         if (render::RenderContext* rc = app_.renderContext()) {
             rc->meshes().forgetFailures();

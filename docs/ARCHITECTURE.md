@@ -163,7 +163,20 @@ streaming.
 
 ### Presentation and threading
 
-Rendering currently happens on the Qt UI thread. Three decisions keep that responsive:
+Viewports render on a thread of their own (`RenderThread`, one per application). Each frame
+the UI thread ticks the viewport's client and takes a `RenderSnapshot`: a copy of the
+components the renderer reads (`Scene::copyInto`, same entity values and the same storage order,
+so the frame is the one the live scene would give), the camera, the settings and the overlays
+they point at. The render thread draws and presents the latest snapshot; work for a viewport that
+has not started is replaced by newer work, so a slow GPU shows the latest state instead of a
+queue. The UI thread therefore never waits for fences, swapchain images or presentation; with
+vsync it paces itself to the display, uncapped it starts the next frame when the last one is
+done. `Renderer` holds a lock while a frame records, submits and presents; captures, bakes and
+cache invalidation from the UI thread take it too (`Renderer::lock`), so they wait for the frame
+in progress. A viewport's target is released only after `RenderThread::forget` has returned.
+`LUMORA_RENDER_THREAD=0` renders on the UI thread as before.
+
+Rendering on the UI thread (the fallback) depends on three decisions to stay responsive:
 
 1. **Present policy:** vsync uses MAILBOX when it is available, because MAILBOX never blocks the
    caller. On Wayland a FIFO `vkQueuePresentKHR` waits for compositor frame callbacks, and the
@@ -175,8 +188,7 @@ Rendering currently happens on the Qt UI thread. Three decisions keep that respo
 3. **Visibility:** rendering stops when Qt reports the window as unexposed and resumes on the next
    expose event.
 
-Planned: a dedicated render thread that consumes an immutable render snapshot of the scene, with
-multithreaded command recording.
+Command recording is already spread over the job system for large passes (`recordInParallel`).
 
 ## Scene and ECS
 

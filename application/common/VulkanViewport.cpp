@@ -6,6 +6,7 @@
 #include "core/Log.hpp"
 #include "renderer/RenderContext.hpp"
 #include "renderer/Renderer.hpp"
+#include "renderer/RenderThread.hpp"
 #include "scene/Scene.hpp"
 
 #include <QAbstractSpinBox>
@@ -162,7 +163,7 @@ VulkanViewport::VulkanViewport(AppContext& app, ViewportClient& client)
     paceTimer_.start();
 }
 
-VulkanViewport::~VulkanViewport() { releaseTarget(); }
+VulkanViewport::~VulkanViewport() { releaseTarget(); }  // also waits for a frame on the render thread
 
 void VulkanViewport::stopLooking() {
     if (pointerLock_) pointerLock_->unlock();
@@ -209,7 +210,8 @@ rhi::PresentPolicy VulkanViewport::policy() const noexcept {
 
 void VulkanViewport::setVsync(bool vsync) {
     vsync_ = vsync;
-    if (target_) target_->setPolicy(policy());
+    // With the render thread the policy travels with the next frame (the target is its to touch).
+    if (target_ && app_.renderThread() == nullptr) target_->setPolicy(policy());
 }
 
 void VulkanViewport::scheduleNextFrame() {
@@ -221,7 +223,8 @@ void VulkanViewport::scheduleNextFrame() {
     // Presentation never blocks this (UI) thread, so with vsync we pace to the screen refresh
     // rate ourselves; FIFO presents already throttle and uncapped mode runs flat out.
     double waitMs = 0.0;
-    if (vsync_ && target_ && !target_->presentBlocks()) {
+    // With the render thread the UI paces itself: nothing it does waits for presentation.
+    if (vsync_ && target_ && (app_.renderThread() != nullptr || !target_->presentBlocks())) {
         const double hz = screen() != nullptr && screen()->refreshRate() > 1.0 ? screen()->refreshRate() : 60.0;
         waitMs = std::max(0.0, 1000.0 / hz - static_cast<double>(paceTimer_.nsecsElapsed()) * 1e-6);
     }
@@ -271,12 +274,16 @@ bool VulkanViewport::ensureTarget() {
 
 void VulkanViewport::releaseTarget() {
     if (!target_) return;
+    if (render::RenderThread* thread = app_.renderThread()) thread->forget(this);  // its frame finishes first
     if (render::Renderer* renderer = app_.renderer()) {
+        const auto held = renderer->lock();
         try {
             renderer->waitIdle();
         } catch (const std::exception& e) {
             log::error("Viewport", "waitIdle failed while releasing swapchain: {}", e.what());
         }
+        target_.reset();
+        return;
     }
     target_.reset();
 }
@@ -329,7 +336,7 @@ void VulkanViewport::renderFrame() {
     }
     paceTimer_.restart();
     const double dt = std::clamp(static_cast<double>(frameTimer_.nsecsElapsed()) * 1e-9, 0.0, 0.25);
-    frameIntervalMs_ = dt * 1000.0;
+    if (app_.renderThread() == nullptr) frameIntervalMs_ = dt * 1000.0;  // else from presented frames
     frameTimer_.restart();
 
     if (pointerLock_) {
@@ -344,6 +351,38 @@ void VulkanViewport::renderFrame() {
     if (scene == nullptr) scene = emptyScene_.get();
     const VkExtent2D extent = pixelExtent();
     const float aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
+
+    if (render::RenderThread* thread = app_.renderThread()) {
+        // The frame goes to the render thread as a snapshot; this thread goes on at once.
+        if (!snapshots_) snapshots_ = std::make_unique<render::SnapshotPool>();
+        std::unique_ptr<render::RenderSnapshot> frame = snapshots_->take();
+        frame->capture(*scene, client_.viewportCamera(aspect), client_.viewportSettings());
+        frame->extent = extent;
+        frame->policy = policy();
+        thread->post(this, [this, renderer = app_.renderer(), target = target_.get(), pool = snapshots_.get(),
+                            frame = std::move(frame)]() mutable {
+            // On the render thread. The target lives until forget(this) has returned.
+            render::FrameResult result = render::FrameResult::Skipped;
+            QString error;
+            bool deviceLost = false;
+            try {
+                target->resize(frame->extent);
+                target->setPolicy(frame->policy);
+                result = renderer->render(*target, frame->scene, frame->camera, frame->settings);
+            } catch (const rhi::DeviceLostError& e) {
+                error = QString::fromUtf8(e.what());
+                deviceLost = true;
+            } catch (const std::exception& e) {
+                error = QString::fromUtf8(e.what());
+            }
+            pool->give(std::move(frame));
+            QMetaObject::invokeMethod(
+                this, [this, result, error, deviceLost] { frameDone(result, error, deviceLost); }, Qt::QueuedConnection);
+        });
+        if (vsync_) scheduleNextFrame();  // paced to the display; uncapped: when this frame is done
+        return;
+    }
+
     target_->resize(extent);
     try {
         const auto result = app_.renderer()->render(*target_, *scene, client_.viewportCamera(aspect),
@@ -376,6 +415,36 @@ void VulkanViewport::renderFrame() {
     }
     emit frameRendered();
     scheduleNextFrame();
+}
+
+void VulkanViewport::frameDone(render::FrameResult result, const QString& error, bool deviceLost) {
+    if (!error.isEmpty()) {
+        fail(deviceLost ? QStringLiteral("The GPU device was lost (driver reset or hang). Rendering is stopped; save your "
+                                         "work and restart Lumora.\n\n%1")
+                              .arg(error)
+                        : QStringLiteral("Rendering failed: %1").arg(error));
+        return;
+    }
+    if (result == render::FrameResult::SurfaceLost) {
+        log::warn("Viewport", "surface lost - recreating");
+        releaseTarget();
+    }
+    if (!diagTimer_.isValid()) diagTimer_.start();
+    (result == render::FrameResult::Rendered ? diagRendered_ : diagSkipped_)++;
+    if (diagTimer_.elapsed() >= 1000) {
+        log::debug("Viewport", "{:.1f} frames/s presented, {} skipped (no swapchain image ready) in {:.1f} s",
+                   diagRendered_ * 1000.0 / static_cast<double>(diagTimer_.elapsed()), diagSkipped_,
+                   static_cast<double>(diagTimer_.elapsed()) / 1000.0);
+        diagRendered_ = diagSkipped_ = 0;
+        diagTimer_.restart();
+    }
+    if (result == render::FrameResult::Rendered) {
+        // What the status bar shows: presented frames, not UI ticks.
+        if (presentTimer_.isValid()) frameIntervalMs_ = static_cast<double>(presentTimer_.nsecsElapsed()) * 1e-6;
+        presentTimer_.restart();
+        emit frameRendered();
+    }
+    if (!vsync_) scheduleNextFrame();
 }
 
 QImage VulkanViewport::captureFrame(QSize pixels) {

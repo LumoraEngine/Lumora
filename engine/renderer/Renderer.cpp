@@ -135,7 +135,13 @@ Renderer::~Renderer() {
     ctx_.gpu()->runGarbageCollection();
 }
 
+FrameStats Renderer::stats() const {
+    const auto held = lock();
+    return stats_;
+}
+
 void Renderer::invalidateAssetFile(const std::filesystem::path& absoluteFile) {
+    const auto held = lock();
     waitIdle();
     const std::string file = absoluteFile.lexically_normal().generic_string();
     const std::size_t meshes = ctx_.meshes().invalidateFile(file);
@@ -145,6 +151,7 @@ void Renderer::invalidateAssetFile(const std::filesystem::path& absoluteFile) {
 }
 
 void Renderer::waitIdle() {
+    const auto held = lock();
     for (FrameResources& f : frames_) {
         if (f.pending) finish(f);
     }
@@ -243,6 +250,7 @@ FrameResult Renderer::renderD3D12(PresentTarget& target, const Scene& scene, con
 
 FrameResult Renderer::render(PresentTarget& target, const Scene& scene, const CameraView& camera,
                              const RenderSettings& settings) {
+    const auto held = lock();
     if (target.d3d12Swapchain_) return renderD3D12(target, scene, camera, settings);
     rhi::Swapchain& swapchain = *target.swapchain_;
     if (target.dirty_ || !swapchain.valid()) {
@@ -293,6 +301,7 @@ Result<CapturedImage> Renderer::capture(const Scene& scene, const CameraView& ca
     if (extent.width == 0 || extent.height == 0 || extent.width > 16384 || extent.height > 16384) {
         return makeError("invalid capture size {}x{}", extent.width, extent.height);
     }
+    const auto held = lock();
     nvrhi::IDevice* gpu = ctx_.gpu();
     nvrhi::TextureDesc desc;
     desc.width = extent.width;
@@ -343,6 +352,7 @@ Result<HdrImage> Renderer::captureHdr(const Scene& scene, const CameraView& came
         return makeError("invalid capture size {}x{}", extent.width, extent.height);
     }
     settings.linearOutput = true;
+    const auto held = lock();
     nvrhi::IDevice* gpu = ctx_.gpu();
     nvrhi::TextureDesc desc;
     desc.width = extent.width;

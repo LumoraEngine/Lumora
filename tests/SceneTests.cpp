@@ -148,3 +148,44 @@ TEST(Prefab, SavesAndInstantiatesASubtree) {
     std::ofstream(bogus) << "{\"format\": \"something else\"}";
     EXPECT_FALSE(loadPrefab(bogus).has_value());
 }
+
+TEST(Scene, CopyIntoKeepsEntitiesOrderAndOnlyTheListedComponents) {
+    Scene scene("Live");
+    const entt::entity a = scene.createEntity("A");
+    const entt::entity b = scene.createEntity("B", Uuid::generate(), a);
+    const entt::entity c = scene.createEntity("C");
+    scene.destroyEntity(c);  // a released identifier in the middle
+    const entt::entity d = scene.createEntity("D");
+    scene.registry().emplace<MeshRendererComponent>(d).baseColor = glm::vec3(0.25f);
+    scene.registry().emplace<MeshRendererComponent>(a).baseColor = glm::vec3(0.5f);
+    scene.registry().emplace<LightComponent>(b).intensity = 7.0f;
+    scene.registry().emplace<RotatorComponent>(a);
+    scene.environment().fogDensity = 0.123f;
+    scene.updateWorldTransforms();
+
+    Scene copy("Old");
+    (void)copy.createEntity("Leftover");
+    scene.copyInto<IdComponent, NameComponent, TransformComponent, WorldTransformComponent, HierarchyComponent,
+                   MeshRendererComponent, LightComponent>(copy);
+    EXPECT_EQ(copy.entityCount(), 3u);
+    for (const entt::entity e : {a, b, d}) {
+        EXPECT_TRUE(copy.isValid(e));
+        EXPECT_EQ(copy.uuidOf(e), scene.uuidOf(e));
+        EXPECT_EQ(copy.nameOf(e), scene.nameOf(e));
+    }
+    EXPECT_EQ(copy.parentOf(b), a);
+    EXPECT_EQ(copy.roots(), scene.roots());
+    EXPECT_FLOAT_EQ(copy.environment().fogDensity, 0.123f);
+    EXPECT_FLOAT_EQ(copy.registry().get<LightComponent>(b).intensity, 7.0f);
+    EXPECT_FALSE(copy.registry().all_of<RotatorComponent>(a)) << "not listed: not copied";
+    // Views visit the copy's entities in the live scene's order.
+    std::vector<entt::entity> live, copied;
+    for (auto [e, m] : scene.registry().view<MeshRendererComponent>().each()) live.push_back(e);
+    for (auto [e, m] : copy.registry().view<MeshRendererComponent>().each()) copied.push_back(e);
+    EXPECT_EQ(copied, live);
+    // Copying again replaces what the copy held.
+    scene.registry().remove<LightComponent>(b);
+    scene.copyInto<IdComponent, NameComponent, TransformComponent, WorldTransformComponent, HierarchyComponent,
+                   MeshRendererComponent, LightComponent>(copy);
+    EXPECT_FALSE(copy.registry().all_of<LightComponent>(b));
+}

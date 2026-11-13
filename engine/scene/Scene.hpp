@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -61,6 +62,24 @@ public:
     [[nodiscard]] EnvironmentSettings& environment() noexcept { return environment_; }
     [[nodiscard]] const EnvironmentSettings& environment() const noexcept { return environment_; }
 
+    /// Replaces `out` with a copy of this scene that has only the components listed (plus the
+    /// identifiers, UUID index, roots, name and environment): the same entity values, and each
+    /// component storage in the same order, so views over the copy visit entities in the order
+    /// they would here. Used for render snapshots (see render::RenderSnapshot).
+    template <class... Components>
+    void copyInto(Scene& out) const {
+        out.registry_.clear();
+        for (const auto& [id, e] : uuidMap_) {
+            [[maybe_unused]] const entt::entity copy = out.registry_.create(e);
+            ENTT_ASSERT(copy == e, "a released identifier is created again as it was");
+        }
+        (copyStorage<Components>(out.registry_), ...);
+        out.uuidMap_ = uuidMap_;
+        out.roots_ = roots_;
+        out.name_ = name_;
+        out.environment_ = environment_;
+    }
+
     /// Depth-first traversal in hierarchy order.
     template <class Fn>
     void forEachDepthFirst(Fn&& fn) const {
@@ -75,6 +94,23 @@ private:
         fn(e, depth);
         for (entt::entity child : childrenOf(e)) {
             visit(child, depth + 1, fn);
+        }
+    }
+
+    template <class C>
+    void copyStorage(entt::registry& to) const {
+        const auto* source = registry_.storage<C>();
+        if (source == nullptr || source->empty()) return;
+        auto& target = to.storage<C>();
+        target.reserve(source->size());
+        // Packed order, front to back (EnTT iterates storages back to front, so this keeps it).
+        const entt::entity* entities = source->data();
+        for (std::size_t i = 0, n = source->size(); i < n; ++i) {
+            if constexpr (std::is_empty_v<C>) {
+                target.emplace(entities[i]);
+            } else {
+                target.emplace(entities[i], source->get(entities[i]));
+            }
         }
     }
 

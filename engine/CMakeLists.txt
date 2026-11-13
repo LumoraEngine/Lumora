@@ -96,6 +96,7 @@ lumora_engine_module(renderer
         renderer/RenderContext.cpp
         renderer/d3d12/D3D12Context.cpp
         renderer/Renderer.cpp
+        renderer/RenderThread.cpp
         renderer/SceneRenderer.cpp
         renderer/SceneRendererLights.cpp
         renderer/SceneRendererObjects.cpp
