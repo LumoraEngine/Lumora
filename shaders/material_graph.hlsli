@@ -101,7 +101,9 @@ void runMaterialGraph(GpuObject object, uint program, uint count, GraphInputs g)
             case 4u: r = a + b; break;
             case 5u: r = a - b; break;
             case 6u: r = a * b; break;
-            case 7u: r = a / (abs(b) > 1e-6 ? b : (b < 0.0 ? -1e-6 : 1e-6)); break;
+            // b kept at least 1e-6 from zero, with its sign. Arithmetic, not ?: (a vector condition
+            // needs select() in DXC, which glslang does not have).
+            case 7u: r = a / ((float4(b >= 0.0) * 2.0 - 1.0) * max(abs(b), 1e-6)); break;
             case 8u: r = min(a, b); break;
             case 9u: r = max(a, b); break;
             case 10u: r = pow(max(a, 0.0), b); break;
