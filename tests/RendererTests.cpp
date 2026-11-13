@@ -2141,6 +2141,104 @@ TEST_F(RendererTest, TexturesAreCompressedCachedAndStreamed) {
     cache.invalidateFile((std::filesystem::weakly_canonical(project.path() / "Content" / "Textures" / "big.png")).generic_string());
 }
 
+#include "assets/Material.hpp"
+#include "renderer/TextureCooker.hpp"
+#include "scene/SceneSerializer.hpp"
+
+namespace {
+
+/// A project whose textures are used as colour (a material and a model), a normal map
+/// (material), a data map (scene), a HUD picture nothing names and a terrain heightmap.
+void writeCookingProject(const std::filesystem::path& root) {
+    const auto textures = root / "Content" / "Textures";
+    std::filesystem::create_directories(textures);
+    std::filesystem::create_directories(root / "Content" / "Materials");
+    std::filesystem::create_directories(root / "Content" / "Models");
+    std::filesystem::create_directories(root / "Content" / "Scenes");
+    std::vector<std::uint8_t> rgba(32 * 32 * 4, 200);
+    for (const char* name : {"albedo.png", "normal.png", "rough.png", "hud.png", "height.png"}) {
+        ASSERT_NE(stbi_write_png((textures / name).string().c_str(), 32, 32, 4, rgba.data(), 32 * 4), 0);
+    }
+    MaterialAsset material;
+    material.baseColorTexture = "Content/Textures/albedo.png";
+    material.normalTexture = "Content/Textures/normal.png";
+    ASSERT_TRUE(saveMaterial(material, root / "Content" / "Materials" / "Rock.lmat").has_value());
+    test::writeCubeGltf(root / "Content" / "Models" / "Cube.gltf", false, true);
+    Scene scene;
+    const entt::entity e = scene.createEntity("Floor");
+    scene.registry().emplace<MeshRendererComponent>(e).metallicRoughnessTexture = "Content/Textures/rough.png";
+    scene.registry().emplace<TerrainComponent>(scene.createEntity("Land")).heightmap = "Content/Textures/height.png";
+    ASSERT_TRUE(SceneSerializer::save(scene, root / "Content" / "Scenes" / "Main.lscene").has_value());
+}
+
+} // namespace
+
+TEST(TextureCooking, FindsEveryUseAndCooksItOnce) {
+    test::TempDir dir;
+    const auto project = dir.path() / "Game";
+    writeCookingProject(project);
+    const std::vector<TextureUse> uses = collectTextureUses(project);
+    const std::vector<TextureUse> expected = {
+        {"Content/Models/Cube.gltf#tex0", TextureKind::Color}, {"Content/Textures/albedo.png", TextureKind::Color},
+        {"Content/Textures/hud.png", TextureKind::Color},      {"Content/Textures/normal.png", TextureKind::Normal},
+        {"Content/Textures/rough.png", TextureKind::Data}};
+    EXPECT_EQ(uses, expected) << "the heightmap is no texture; the HUD picture is colour";
+
+    // One of them was compressed by the editor already: copied, not compressed again.
+    const auto albedo = project / "Content" / "Textures" / "albedo.png";
+    const auto editorCache = textureCacheFile(project, albedo.generic_string() + textureKindSuffix(TextureKind::Color), albedo);
+    std::vector<std::uint8_t> rgba(32 * 32 * 4, 200);
+    ASSERT_TRUE(saveTextureMips(editorCache, prepareTexture(rgba, 32, 32, TextureKind::Color, true)).has_value());
+
+    std::vector<std::string> warnings;
+    std::size_t calls = 0;
+    const auto out = dir.path() / "Export";
+    auto stats = cookTextures({project, out, [&](std::size_t, std::size_t total, const std::string&) {
+                                   EXPECT_EQ(total, expected.size());
+                                   ++calls;
+                                   return true;
+                               },
+                               &warnings});
+    ASSERT_TRUE(stats.has_value()) << stats.error().message;
+    EXPECT_EQ(stats->cooked, 4u);
+    EXPECT_EQ(stats->reused, 1u);
+    EXPECT_EQ(stats->failed, 0u);
+    EXPECT_TRUE(warnings.empty());
+    EXPECT_EQ(calls, expected.size() + 1) << "once per texture and once at the end";
+    for (const TextureUse& use : expected) {
+        const auto source = (project / use.key.substr(0, use.key.find('#'))).lexically_normal();
+        auto cooked = loadTextureMips(cookedTextureFile(out, use.key, use.kind, std::filesystem::file_size(source)));
+        ASSERT_TRUE(cooked.has_value()) << use.key << ": " << cooked.error().message;
+        const bool model = use.key.find('#') != std::string::npos;  // an opaque green picture
+        EXPECT_EQ(cooked->format, textureFormat(use.kind, !model, true)) << use.key;
+        if (!model) EXPECT_EQ(cooked->width, 32u);
+    }
+    EXPECT_FALSE(cookTextures({project, dir.path() / "Cancelled", [](auto...) { return false; }}).has_value()) << "cancelled";
+}
+
+TEST_F(RendererTest, CookedTexturesAreUploadedWithoutPreparing) {
+    if (!context_->caps().textureCompressionBC) GTEST_SKIP() << "no BC texture support";
+    test::TempDir dir;
+    const auto project = dir.path() / "Game";
+    writeCookingProject(project);
+    ASSERT_TRUE(cookTextures({project, project}).has_value());
+    AssetLibrary assets(project);
+    TextureCache& cache = context_->textures();
+    cache.beginFrame();
+    EXPECT_NE(cache.index(assets, "Content/Textures/normal.png", TextureKind::Normal, true), UINT32_MAX);
+    EXPECT_NE(cache.index(assets, "Content/Models/Cube.gltf#tex0", TextureKind::Color, true), UINT32_MAX);
+    EXPECT_FALSE(std::filesystem::exists(project / "Saved" / "TextureCache")) << "nothing was compressed, so nothing cached";
+    // A changed source (another size) no longer matches its cooked file: prepared as before.
+    std::vector<std::uint8_t> rgba(16 * 16 * 4, 90);
+    ASSERT_NE(stbi_write_png((project / "Content" / "Textures" / "rough.png").string().c_str(), 16, 16, 4, rgba.data(), 16 * 4), 0);
+    EXPECT_NE(cache.index(assets, "Content/Textures/rough.png", TextureKind::Data, true), UINT32_MAX);
+    EXPECT_TRUE(std::filesystem::exists(project / "Saved" / "TextureCache"));
+    context_->gpu()->waitForIdle();
+    for (const char* file : {"Content/Textures/normal.png", "Content/Models/Cube.gltf", "Content/Textures/rough.png"}) {
+        cache.invalidateFile((project / file).lexically_normal().generic_string());
+    }
+}
+
 TEST_F(RendererTest, AutoExposureMatchesBrightAndDimScenesAndAdaptsOverTime) {
     auto scene = shadowScene();
     addCube(*scene, {0.0f, 1.0f, 0.0f});

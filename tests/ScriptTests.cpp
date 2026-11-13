@@ -1,5 +1,6 @@
 // Gameplay scripting end to end: real C++ scripts compiled with CMake and the system compiler,
 // loaded into a simulation, changed, rebuilt and hot-reloaded while it runs.
+#include "GltfTestUtils.hpp"
 #include "TestUtils.hpp"
 
 #include "common/GameExporter.hpp"
@@ -293,10 +294,23 @@ TEST(GameExport, WritesARunnableStandaloneGame) {
     std::filesystem::create_directories(dir.path() / "Demo" / "Scripts" / "ai");
     std::ofstream(dir.path() / "Demo" / "Scripts" / "Player.cpp") << "// C++ source";
     std::ofstream(dir.path() / "Demo" / "Scripts" / "ai" / "Enemy.lua") << "return {}";
+    std::filesystem::create_directories(dir.path() / "Demo" / "Content" / "Textures");
+    const auto png = test::solidPng(8, 8, 200, 40, 40);
+    std::ofstream(dir.path() / "Demo" / "Content" / "Textures" / "Logo.png", std::ios::binary)
+        .write(reinterpret_cast<const char*>(png.data()), static_cast<std::streamsize>(png.size()));
 
     const std::filesystem::path out = dir.path() / "Export";
-    auto launcher = app::exportGame({dir.path() / "Demo", "Demo", out, {}});
+    std::size_t lastTotal = 0;
+    app::GameExport request{dir.path() / "Demo", "Demo", out, {}};
+    request.progress = [&](std::size_t, std::size_t total, const std::string&) {
+        lastTotal = total;
+        return true;
+    };
+    auto launcher = app::exportGame(request);
     ASSERT_TRUE(launcher.has_value()) << launcher.error().message;
+    EXPECT_GE(lastTotal, 1u) << "the picture was cooked";
+    EXPECT_FALSE(std::filesystem::is_empty(out / "Game" / "Cooked" / "Textures"));
+    EXPECT_TRUE(std::filesystem::exists(out / "Game" / "Content" / "Textures" / "Logo.png")) << "sources stay";
     EXPECT_TRUE(std::filesystem::exists(*launcher));
     EXPECT_TRUE(std::filesystem::exists(out / "Game" / "Demo.lumora"));
     EXPECT_TRUE(std::filesystem::exists(out / "Game" / "Content" / "Scenes" / "Main.lscene"));

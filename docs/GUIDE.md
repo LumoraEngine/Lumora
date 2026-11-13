@@ -593,6 +593,15 @@ game library, plus a launcher (`run.sh` on Linux, `<Name>.bat` on Windows). Copy
 any computer with a Vulkan 1.4 GPU and start the launcher; players do not need Lumora. Script
 sources and editor caches stay behind. Build the scripts first if the game has any.
 
+**Cooked textures.** The export also compresses every texture the game uses (block formats with
+their mips) into `Game/Cooked/Textures/`, so the game uploads them at once instead of compressing
+them on each player's first run. Textures the editor has already compressed are copied from its
+cache. What a texture is used for decides its format: normal maps and data maps (metallic-roughness,
+occlusion) are named by the fields of scenes, prefabs, materials and material graphs; models bring
+their own maps; images nothing names (pictures that scripts put on the HUD) are cooked as colour.
+The source images stay in the game (heightmaps and other CPU users read them); a source changed
+after the export no longer matches its cooked file and is prepared as before.
+
 **Windows and Linux.** The dialog asks for the platform. The editor exports for its own platform
 out of the box; for the other one, add its **build support** in the Hub: *Editors → Build
 Support → Add Windows Build Support* (or Linux) on the installed version, or tick *Also install

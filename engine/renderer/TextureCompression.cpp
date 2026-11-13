@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <format>
 
 namespace lumora::render {
 
@@ -40,7 +41,61 @@ std::size_t levelBytes(nvrhi::Format format, std::uint32_t w, std::uint32_t h) {
     return static_cast<std::size_t>((w + 3) / 4) * ((h + 3) / 4) * blockBytes(format);
 }
 
+/// FNV-1a over the bytes of a string, then 64-bit values.
+struct Fnv {
+    std::uint64_t h = 1469598103934665603ull;
+    void mix(std::uint64_t v) { h = (h ^ v) * 1099511628211ull; }
+    void mix(std::string_view s) {
+        for (const char c : s) mix(static_cast<std::uint64_t>(static_cast<unsigned char>(c)));
+    }
+};
+
 } // namespace
+
+const char* textureKindSuffix(TextureKind kind) {
+    switch (kind) {
+        case TextureKind::Color: return "|color";
+        case TextureKind::Data: return "|data";
+        case TextureKind::Normal: return "|normal";
+    }
+    return "|color";
+}
+
+std::filesystem::path textureCacheFile(const std::filesystem::path& root, std::string_view id, const std::filesystem::path& source) {
+    if (root.empty()) return {};
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(source, ec);
+    if (ec) return {};
+    const auto time = std::filesystem::last_write_time(source, ec);
+    if (ec) return {};
+    Fnv f;
+    f.mix(id);
+    f.mix(static_cast<std::uint64_t>(size));
+    f.mix(static_cast<std::uint64_t>(time.time_since_epoch().count()));
+    f.mix(static_cast<std::uint64_t>(kTexturePreparationVersion));
+    return root / "Saved" / "TextureCache" / std::format("{:016x}.ltex", f.h);
+}
+
+std::string relativeTextureKey(const std::filesystem::path& root, std::string_view canonical) {
+    if (root.empty()) return {};
+    const auto hash = canonical.find('#');
+    const std::filesystem::path file(std::string(canonical.substr(0, hash)));
+    const std::filesystem::path relative = file.lexically_relative(root.lexically_normal());
+    if (relative.empty() || *relative.begin() == ".." || relative.is_absolute()) return {};
+    std::string key = relative.generic_string();
+    if (hash != std::string_view::npos) key += canonical.substr(hash);
+    return key;
+}
+
+std::filesystem::path cookedTextureFile(const std::filesystem::path& root, std::string_view relativeKey, TextureKind kind,
+                                        std::uintmax_t sourceSize) {
+    Fnv f;
+    f.mix(relativeKey);
+    f.mix(std::string_view(textureKindSuffix(kind)));
+    f.mix(static_cast<std::uint64_t>(sourceSize));
+    f.mix(static_cast<std::uint64_t>(kTexturePreparationVersion));
+    return root / "Cooked" / "Textures" / std::format("{:016x}.ltex", f.h);
+}
 
 std::size_t TextureMips::bytes(std::uint32_t firstLevel) const {
     std::size_t total = 0;

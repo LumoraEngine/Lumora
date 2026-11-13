@@ -18,23 +18,24 @@ namespace {
 constexpr std::uint64_t kRetireFrames = 4;       // frames in flight, and then some
 constexpr std::uint32_t kFirstAppearance = 256;  // texels across a texture shows at first
 constexpr std::uint64_t kUnusedFrames = 120;     // then it may be dropped for the budget
-constexpr std::uint32_t kCacheVersion = 1;       // bump when prepared textures change
 
-/// <root>/Saved/TextureCache/<hash>.ltex for a texture read from `file`, or empty.
-std::filesystem::path cacheFile(const std::filesystem::path& root, const std::string& id, const std::string& file) {
-    if (root.empty()) return {};
+/// A shipped game's cooked texture (see cookTextures), or null if there is none.
+std::shared_ptr<const TextureMips> loadCooked(const std::filesystem::path& root, const std::string& canonical, TextureKind kind,
+                                              const std::string& file) {
+    const std::string relative = relativeTextureKey(root, canonical);
+    if (relative.empty()) return nullptr;
     std::error_code ec;
+    if (!std::filesystem::is_directory(root / "Cooked" / "Textures", ec)) return nullptr;
     const auto size = std::filesystem::file_size(file, ec);
-    if (ec) return {};
-    const auto time = std::filesystem::last_write_time(file, ec);
-    if (ec) return {};
-    std::uint64_t h = 1469598103934665603ull;
-    auto mix = [&](std::uint64_t v) { h = (h ^ v) * 1099511628211ull; };
-    for (const char c : id) mix(static_cast<unsigned char>(c));
-    mix(size);
-    mix(static_cast<std::uint64_t>(time.time_since_epoch().count()));
-    mix(kCacheVersion);
-    return root / "Saved" / "TextureCache" / std::format("{:016x}.ltex", h);
+    if (ec) return nullptr;
+    const std::filesystem::path cooked = cookedTextureFile(root, relative, kind, size);
+    if (!std::filesystem::exists(cooked, ec)) return nullptr;
+    auto loaded = loadTextureMips(cooked);
+    if (!loaded) {
+        log::warn("Renderer", "cooked texture {}: {}", cooked.filename().string(), loaded.error().message);
+        return nullptr;
+    }
+    return std::make_shared<const TextureMips>(std::move(*loaded));
 }
 
 } // namespace
@@ -99,8 +100,7 @@ std::uint32_t TextureCache::index(AssetLibrary& library, const std::string& key,
     if (key.empty()) return UINT32_MAX;
     auto canonical = library.canonicalTextureKey(key);
     if (!canonical) return UINT32_MAX;
-    static constexpr const char* kSuffix[] = {"|color", "|data", "|normal"};
-    const std::string id = *canonical + kSuffix[static_cast<int>(kind)];
+    const std::string id = *canonical + textureKindSuffix(kind);
     if (failed_.contains(id)) return UINT32_MAX;
     Entry& entry = textures_[id];
     entry.lastUsed = frame_;
@@ -111,7 +111,9 @@ std::uint32_t TextureCache::index(AssetLibrary& library, const std::string& key,
         if (!entry.preparing.valid()) {
             entry.name = key;
             const std::string file = canonical->substr(0, canonical->find('#'));
-            const std::filesystem::path cached = cacheFile(library.root(), id, file);
+            // Block-compressed data only helps a GPU that reads it.
+            if (compression_) entry.mips = loadCooked(library.root(), *canonical, kind, file);
+            const std::filesystem::path cached = entry.mips ? std::filesystem::path{} : textureCacheFile(library.root(), id, file);
             if (!cached.empty() && std::filesystem::exists(cached)) {
                 if (auto loaded = loadTextureMips(cached)) {
                     entry.mips = std::make_shared<const TextureMips>(std::move(*loaded));

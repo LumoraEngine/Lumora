@@ -2063,7 +2063,19 @@ void EditorWindow::exportGameDialog() {
     for (const app::ExportTarget& t : targets) {
         if (t.platform == target) request.runtimeRoot = t.runtimeRoot;
     }
+    QProgressDialog progress(tr("Cooking textures…"), tr("Cancel"), 0, 1, this);
+    progress.setWindowTitle(tr("Export Game"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(300);
+    request.progress = [&](std::size_t done, std::size_t total, const std::string& key) {
+        progress.setMaximum(static_cast<int>(std::max<std::size_t>(total, 1)));
+        progress.setValue(static_cast<int>(done));
+        if (!key.empty()) progress.setLabelText(tr("Cooking textures…\n%1").arg(QString::fromStdString(key)));
+        QCoreApplication::processEvents();
+        return !progress.wasCanceled();
+    };
     auto launcher = app::exportGame(request);
+    progress.reset();
     if (!launcher) {
         QMessageBox::critical(this, tr("Export failed"), QString::fromStdString(launcher.error().message));
         return;

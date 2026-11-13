@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace lumora::render {
@@ -44,5 +46,27 @@ struct TextureMips {
 /// The .ltex cache file: "LTX1", format, width, height, level count, then each level's size and bytes.
 [[nodiscard]] Result<> saveTextureMips(const std::filesystem::path& file, const TextureMips& mips);
 [[nodiscard]] Result<TextureMips> loadTextureMips(const std::filesystem::path& file);
+
+/// Raised whenever prepareTexture() gives different results: old .ltex files are ignored.
+inline constexpr std::uint32_t kTexturePreparationVersion = 1;
+
+/// "|color", "|data" or "|normal": appended to texture keys in cache identities.
+[[nodiscard]] const char* textureKindSuffix(TextureKind kind);
+
+/// The editor's cache file for a texture: <root>/Saved/TextureCache/<hash>.ltex, from its
+/// identity (absolute canonical key + kind suffix) and the source file's size and time.
+/// Empty when `root` is empty or the source cannot be read.
+[[nodiscard]] std::filesystem::path textureCacheFile(const std::filesystem::path& root, std::string_view id,
+                                                     const std::filesystem::path& source);
+
+/// The project-relative form ("Content/T.png", "Content/M.glb#tex2") of a canonical texture key
+/// (AssetLibrary::canonicalTextureKey); empty when it lies outside `root`.
+[[nodiscard]] std::string relativeTextureKey(const std::filesystem::path& root, std::string_view canonical);
+
+/// A cooked texture of a shipped game: <root>/Cooked/Textures/<hash>.ltex, from the
+/// project-relative key, the kind and the source's size (not its time: copies keep the
+/// contents, not the time). Written by cookTextures(), read by TextureCache.
+[[nodiscard]] std::filesystem::path cookedTextureFile(const std::filesystem::path& root, std::string_view relativeKey,
+                                                      TextureKind kind, std::uintmax_t sourceSize);
 
 } // namespace lumora::render

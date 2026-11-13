@@ -2,6 +2,7 @@
 
 #include "common/ProjectUi.hpp"
 #include "core/Log.hpp"
+#include "renderer/TextureCooker.hpp"
 
 #include <QCoreApplication>
 
@@ -121,7 +122,7 @@ Result<fs::path> exportGame(const GameExport& request) {
     // C++ sources stay behind (the built library goes along); Lua scripts run from source.
     auto copied = copyTree(request.projectRoot, request.output / "Game", [&](const fs::path& relative) {
         const std::string first = relative.begin()->string();
-        if (first == "Saved" || first == ".git") return true;
+        if (first == "Saved" || first == ".git" || first == "Cooked") return true;
         if (first != "Scripts") return false;
         std::error_code e;
         if (fs::is_directory(request.projectRoot / relative, e)) return false;
@@ -148,6 +149,10 @@ Result<fs::path> exportGame(const GameExport& request) {
             return std::unexpected(lib.error());
         }
     }
+
+    // Textures, compressed once here instead of on every player's first run.
+    render::TextureCooking cooking{request.projectRoot, request.output / "Game", request.progress, request.warnings};
+    if (auto cooked = render::cookTextures(cooking); !cooked) return std::unexpected(cooked.error());
 
     fs::path launcher;
     if (isWindows(platform)) {
