@@ -11,6 +11,8 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <format>
 #include <fstream>
 #include <sstream>
@@ -545,13 +547,56 @@ void watchdog(lua_State* L, lua_Debug*) {
     if (hostOf(L).overDeadline()) luaL_error(L, "the script ran for too long (an endless loop?)");
 }
 
+/// lua_Alloc with a budget: growing past the limit fails (Lua raises "not enough memory" in the
+/// script); shrinking and freeing always work.
+void* limitedAlloc(void* ud, void* ptr, std::size_t osize, std::size_t nsize) {
+    auto& memory = *static_cast<LuaHost::Memory*>(ud);
+    const std::size_t old = ptr != nullptr ? osize : 0;  // without ptr, osize is a type tag
+    if (nsize == 0) {
+        std::free(ptr);
+        memory.used -= old;
+        return nullptr;
+    }
+    if (nsize > old && memory.used - old + nsize > memory.limit) return nullptr;
+    void* grown = std::realloc(ptr, nsize);
+    if (grown != nullptr) memory.used = memory.used - old + nsize;
+    return grown;
+}
+
+int panic(lua_State* L) {
+    const char* message = lua_tostring(L, -1);
+    std::fprintf(stderr, "Lua: unprotected error: %s\n", message != nullptr ? message : "(not a string)");
+    return 0;  // Lua aborts
+}
+
+/// load() for source text only: bytecode can corrupt the interpreter and leave the sandbox.
+int lLoad(lua_State* L) {
+    const int n = lua_gettop(L);
+    lua_pushvalue(L, lua_upvalueindex(1));  // the standard load
+    lua_pushvalue(L, 1);
+    if (n >= 2) {
+        lua_pushvalue(L, 2);
+    } else {
+        lua_pushnil(L);
+    }
+    lua_pushliteral(L, "t");
+    int args = 3;
+    if (n >= 4) {  // an environment, even nil, only when given (load tells "none" from nil)
+        lua_pushvalue(L, 4);
+        args = 4;
+    }
+    lua_call(L, args, LUA_MULTRET);
+    return lua_gettop(L) - n;
+}
+
 } // namespace
 
 // ---- LuaHost ----------------------------------------------------------------------------------
 
 LuaHost::LuaHost(const script::EngineApi* api, std::filesystem::path projectRoot) : api_(api), root_(std::move(projectRoot)) {
-    L_ = luaL_newstate();
+    L_ = lua_newstate(limitedAlloc, &memory_);
     if (L_ == nullptr) return;
+    lua_atpanic(L_, panic);
     *static_cast<LuaHost**>(lua_getextraspace(L_)) = this;
 
     // Safe standard libraries only.
@@ -573,6 +618,13 @@ LuaHost::LuaHost(const script::EngineApi* api, std::filesystem::path projectRoot
         lua_pushnil(L_);
         lua_setglobal(L_, unsafe);
     }
+    lua_getglobal(L_, "load");
+    lua_pushcclosure(L_, lLoad, 1);
+    lua_setglobal(L_, "load");
+    lua_getglobal(L_, "string");
+    lua_pushnil(L_);
+    lua_setfield(L_, -2, "dump");  // functions to bytecode: nothing may load it
+    lua_pop(L_, 1);
     lua_newtable(L_);
     lua_setfield(L_, LUA_REGISTRYINDEX, "lumora.modules");
     lua_pushcfunction(L_, lRequire);

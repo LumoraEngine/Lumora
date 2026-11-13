@@ -137,8 +137,11 @@ The full list is in `runtime/LuaPrelude.lua`.
 `require("util.math")` loads `Scripts/util/math.lua` once and returns what it returned.
 
 Scripts run in a sandbox: there is no `io`, `os.execute`, `dofile`, `loadfile` or C module
-loading, and only the clock functions of `os` remain. A call that runs longer than five seconds
-is stopped.
+loading, and only the clock functions of `os` remain. `load` accepts source text only (the mode
+argument is ignored) and `string.dump` is gone: precompiled bytecode can break out of the sandbox.
+A call that runs longer than five seconds is stopped. The scripts of one game share at most 512 MB;
+an allocation past that fails in the script with "not enough memory" (catch it with `pcall`), and
+the game keeps running.
 
 An error disables only that behaviour. The Console shows the message with the file and line.
 Save a fix and the behaviour starts again.

@@ -20,12 +20,16 @@
 // runtime/LuaPrelude.lua (embedded) and docs/SCRIPTING.md.
 //
 // Scripts run in a sandbox: no io, os.execute, dofile, loadfile or C modules. require("name")
-// loads Scripts/name.lua. A call that runs longer than five seconds is aborted (endless loop).
+// loads Scripts/name.lua. load() takes source text only (precompiled bytecode can break out of
+// the sandbox, so neither it nor string.dump is there). A call that runs longer than five seconds
+// is aborted (endless loop), and the state may hold at most 512 MB (an allocation beyond that
+// fails with "not enough memory" in the script, not in the game).
 #pragma once
 
 #include <lumora/Script.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -88,6 +92,15 @@ public:
 
     /// Longest time a single call may take before it is aborted.
     void setTimeLimit(std::chrono::milliseconds limit) noexcept { timeLimit_ = limit; }
+    /// Most memory the Lua state may hold; allocations beyond it fail inside the script.
+    void setMemoryLimit(std::size_t bytes) noexcept { memory_.limit = bytes; }
+    [[nodiscard]] std::size_t memoryUsed() const noexcept { return memory_.used; }
+
+    /// Byte count kept by the state's allocator.
+    struct Memory {
+        std::size_t used = 0;
+        std::size_t limit = std::size_t{512} << 20;
+    };
 
     // Used by the C callbacks.
     [[nodiscard]] const script::EngineApi* api() const noexcept { return api_; }
@@ -103,6 +116,7 @@ private:
         int ref;
         std::filesystem::file_time_type modified;
     };
+    Memory memory_;  // before L_: the state's allocator uses it until lua_close
     lua_State* L_ = nullptr;
     bool ready_ = false;  // the prelude loaded
     const script::EngineApi* api_;

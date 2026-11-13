@@ -1,6 +1,7 @@
 #include "TestUtils.hpp"
 
 #include "runtime/AudioWorld.hpp"
+#include "runtime/LuaScript.hpp"
 #include "runtime/Simulation.hpp"
 #include "scene/Hud.hpp"
 #include "scene/Scene.hpp"
@@ -133,6 +134,29 @@ TEST(LuaScript, SandboxHasNoFileOrProcessAccess) {
     w.sim->step();
     EXPECT_FLOAT_EQ(w.position(e).x, 1.0f);
     EXPECT_FLOAT_EQ(w.scene.registry().get<TransformComponent>(e).scale.x, 1.0f) << "require cannot leave Scripts/";
+}
+
+TEST(LuaScript, SandboxLoadsNoBytecodeAndBoundsMemory) {
+    test::TempDir dir;
+    script::EngineApi api{};
+    api.log = [](void*, int, const char*) {};
+    LuaHost host(&api, dir.path());
+    std::string error;
+    EXPECT_TRUE(host.run("assert(load('return 1 + 1')() == 2)", error)) << error;
+    EXPECT_TRUE(host.run("local f = load('return x', 'c', 't', {x = 5}) assert(f() == 5)", error)) << error << ": environments work";
+    EXPECT_TRUE(host.run("assert(string.dump == nil)", error)) << error;
+    // A binary chunk (Lua 5.4's signature), also when the script asks for binary mode.
+    EXPECT_TRUE(host.run(R"(
+        local f, e = load("\27LuaT\0\25\147\13\10\26\10")
+        assert(f == nil and e:find("binary"), e)
+        f, e = load("\27LuaT\0\25\147\13\10\26\10", "c", "b")
+        assert(f == nil and e:find("binary"), e)
+    )", error)) << error;
+
+    host.setMemoryLimit(host.memoryUsed() + (std::size_t{8} << 20));
+    EXPECT_FALSE(host.run("local t = {} for i = 1, 1e6 do t[i] = string.rep('x', 4096) .. i end", error));
+    EXPECT_NE(error.find("not enough memory"), std::string::npos) << error;
+    EXPECT_TRUE(host.run("local s = string.rep('y', 1000) assert(#s == 1000)", error)) << error << ": still usable afterwards";
 }
 
 TEST(LuaScript, EndlessLoopIsAbortedByTheWatchdog) {
