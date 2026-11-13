@@ -65,6 +65,9 @@ public:
     /// The pass records its draws with PassContext::recordParallel, possibly into several
     /// command lists on the job system's threads.
     void recordInParallel(bool parallel = true);
+    /// The pass writes something the graph does not see (a buffer, a staging texture) besides
+    /// its images: it runs even when nothing reads them. (A pass that writes no image always runs.)
+    void keepAlways();
 
 private:
     friend class RenderGraph;
@@ -104,6 +107,8 @@ struct GraphRuntime {
     /// An open command list for work recorded after a parallel pass or on worker threads.
     std::function<nvrhi::CommandListHandle()> newList;
     bool allowParallel = true;
+    /// Transient images whose lifetimes do not overlap share textures (see RenderGraph::compile).
+    bool shareTransients = true;
     std::uint32_t maxThreads = 8;
 };
 
@@ -143,11 +148,20 @@ private:
     nvrhi::IBindingSet* storageSet_ = nullptr;
 };
 
-/// Frame render graph: passes are declared each frame in execution order; the graph realises
-/// transient images from a pool, clears attachments, builds framebuffers, puts sampled images
+/// Frame render graph: passes are declared each frame in execution order; the graph culls the
+/// passes nothing needs, realises transient images from a pool (sharing textures between images
+/// that are not alive at once), clears attachments, builds framebuffers, puts sampled images
 /// into shader-readable state, times each pass and splits parallel passes over command lists.
 class RenderGraph {
 public:
+    /// This frame's transient images and the textures they were given.
+    struct TransientStats {
+        std::uint32_t images = 0;        // used by a pass that runs
+        std::uint32_t textures = 0;      // they share
+        std::uint64_t bytes = 0;         // of those textures
+        std::uint64_t unsharedBytes = 0; // a texture per image would take
+    };
+
     using ExecuteFn = std::function<void(PassContext&)>;
     using SetupFn = std::function<void(PassBuilder&)>;
 
@@ -166,9 +180,25 @@ public:
     /// Storage image slots of a compute pass.
     static constexpr std::uint32_t kStorageSlots = 4;
 
-    /// Records every pass, starting in `first` (open). Returns the command lists in execution
-    /// order: all closed except the last one, which stays open for the caller.
+    /// Decides what runs and which texture each transient image gets (execute() does it first;
+    /// callable without a GPU):
+    /// - a pass runs when it writes an imported image, an image a later running pass reads, no
+    ///   image at all (its effects are outside the graph), or it keeps itself (keepAlways); the
+    ///   other passes are culled;
+    /// - an image lives from the first to the last running pass that uses it. Images of the same
+    ///   size and format whose lives do not overlap share a texture (unless `shareTextures` is
+    ///   false); images no running pass uses get none.
+    void compile(bool shareTextures = true);
+    /// Records every running pass, starting in `first` (open). Returns the command lists in
+    /// execution order: all closed except the last one, which stays open for the caller.
     std::vector<nvrhi::CommandListHandle> execute(nvrhi::CommandListHandle first, GraphRuntime& runtime);
+
+    /// After compile(): whether a pass was culled, how many were, and the texture (an index
+    /// shared by the images that alias) of a transient image; UINT32_MAX if it has none.
+    [[nodiscard]] bool culled(std::size_t pass) const { return !passes_.at(pass).runs; }
+    [[nodiscard]] std::uint32_t culledCount() const noexcept;
+    [[nodiscard]] std::uint32_t textureOf(RGImage image) const { return resource(image).slot; }
+    [[nodiscard]] TransientStats transientStats() const;
 
     /// Command lists recorded by parallel passes in the last execute().
     [[nodiscard]] std::uint32_t parallelChunksRecorded() const noexcept { return parallelChunks_; }
@@ -193,12 +223,22 @@ private:
         bool compute = false;
         std::vector<Access> accesses;
         ExecuteFn execute;
+        bool keep = false;  // keepAlways
+        bool runs = true;   // see compile()
     };
     struct Resource {
         std::string name;
         bool imported = false;
         ImportedImage physical;  // filled at import or when realised
         TransientImageDesc desc;
+        std::uint32_t first = UINT32_MAX;  // running passes that use it (compile)
+        std::uint32_t last = 0;
+        std::uint32_t slot = UINT32_MAX;   // its texture in slots_
+    };
+    struct Slot {
+        TransientImageDesc desc;
+        std::uint32_t last = 0;  // the last pass of the images in it so far
+        std::uint32_t firstImage = 0;
     };
 
     void addAccess(std::uint32_t pass, const Access& access);
@@ -206,6 +246,7 @@ private:
 
     std::vector<Pass> passes_;
     std::vector<Resource> resources_;
+    std::vector<Slot> slots_;
     std::vector<nvrhi::CommandListHandle> lists_;  // during execute
     std::vector<nvrhi::FramebufferHandle> ownedFramebuffers_;
     std::vector<nvrhi::BindingSetHandle> ownedBindingSets_;

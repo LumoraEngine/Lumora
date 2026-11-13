@@ -46,6 +46,7 @@ void PassBuilder::writeStorage(RGImage image) { graph_.addAccess(pass_, {image, 
 void PassBuilder::copyFrom(RGImage image) { graph_.addAccess(pass_, {image, ImageUsage::CopySource}); }
 void PassBuilder::copyTo(RGImage image) { graph_.addAccess(pass_, {image, ImageUsage::CopyDestination, LoadOp::DontCare}); }
 void PassBuilder::recordInParallel(bool parallel) { graph_.passes_.at(pass_).parallel = parallel; }
+void PassBuilder::keepAlways() { graph_.passes_.at(pass_).keep = true; }
 
 // ---- PassContext ---------------------------------------------------------------------------------
 
@@ -161,20 +162,137 @@ void RenderGraph::addAccess(std::uint32_t pass, const Access& access) {
 
 const RenderGraph::Resource& RenderGraph::resource(RGImage h) const { return resources_.at(h.id); }
 
+namespace {
+
+bool writes(ImageUsage usage) {
+    return usage == ImageUsage::ColorAttachment || usage == ImageUsage::DepthAttachment || usage == ImageUsage::Storage ||
+           usage == ImageUsage::CopyDestination;
+}
+
+std::uint64_t imageBytes(const TransientImageDesc& d) { return render::imageBytes(d.format, d.width, d.height, d.depth); }
+
+} // namespace
+
+void RenderGraph::compile(bool shareTextures) {
+    // What earlier passes wrote matters only to the passes that read it: a colour or depth
+    // attachment that is loaded (blended into, depth-tested), or an image sampled, copied or
+    // used as storage. Backwards from the last pass, a pass runs when someone needs its output.
+    auto reads = [](const Access& a) {
+        switch (a.usage) {
+            case ImageUsage::ColorAttachment:
+            case ImageUsage::DepthAttachment:
+                return a.load == LoadOp::Load;
+            case ImageUsage::CopyDestination:
+                return false;
+            default:
+                return true;
+        }
+    };
+    std::vector<bool> needed(resources_.size(), false);
+    for (std::size_t p = passes_.size(); p-- > 0;) {
+        Pass& pass = passes_[p];
+        bool writesImage = false;
+        bool useful = pass.keep;
+        for (const Access& a : pass.accesses) {
+            if (!writes(a.usage)) continue;
+            writesImage = true;
+            useful = useful || resources_[a.image.id].imported || needed[a.image.id];
+        }
+        pass.runs = useful || !writesImage;
+        if (!pass.runs) continue;
+        for (const Access& a : pass.accesses) {
+            if (reads(a)) needed[a.image.id] = true;
+        }
+    }
+
+    // Lifetimes over the passes that run.
+    for (Resource& r : resources_) {
+        r.first = UINT32_MAX;
+        r.last = 0;
+        r.slot = UINT32_MAX;
+    }
+    for (std::uint32_t p = 0; p < passes_.size(); ++p) {
+        if (!passes_[p].runs) continue;
+        for (const Access& a : passes_[p].accesses) {
+            Resource& r = resources_[a.image.id];
+            r.first = std::min(r.first, p);
+            r.last = std::max(r.last, p);
+        }
+    }
+
+    // Textures: in order of first use, an image takes a texture of its size and format that no
+    // image alive with it holds (preferably one with the same storage use), else a new one.
+    // A texture any of its images writes as storage is made for storage (2D ones are render
+    // targets too).
+    slots_.clear();
+    std::vector<std::uint32_t> order;
+    for (std::uint32_t i = 0; i < resources_.size(); ++i) {
+        if (!resources_[i].imported && resources_[i].first != UINT32_MAX) order.push_back(i);
+    }
+    std::ranges::stable_sort(order, {}, [&](std::uint32_t i) { return resources_[i].first; });
+    for (std::uint32_t i : order) {
+        Resource& r = resources_[i];
+        const TransientImageDesc& d = r.desc;
+        std::uint32_t chosen = UINT32_MAX;
+        if (shareTextures) {
+            for (std::uint32_t s = 0; s < slots_.size(); ++s) {
+                const TransientImageDesc& t = slots_[s].desc;
+                if (slots_[s].last >= r.first || t.format != d.format || t.width != d.width || t.height != d.height ||
+                    t.depth != d.depth) {
+                    continue;
+                }
+                if (chosen == UINT32_MAX || (t.storage == d.storage && slots_[chosen].desc.storage != d.storage)) chosen = s;
+            }
+        }
+        if (chosen == UINT32_MAX) {
+            chosen = static_cast<std::uint32_t>(slots_.size());
+            slots_.push_back({d, 0, i});
+        }
+        Slot& slot = slots_[chosen];
+        slot.desc.storage = slot.desc.storage || d.storage;
+        slot.last = r.last;
+        r.slot = chosen;
+    }
+}
+
+std::uint32_t RenderGraph::culledCount() const noexcept {
+    return static_cast<std::uint32_t>(std::ranges::count(passes_, false, &Pass::runs));
+}
+
+RenderGraph::TransientStats RenderGraph::transientStats() const {
+    TransientStats s;
+    s.textures = static_cast<std::uint32_t>(slots_.size());
+    for (const Slot& slot : slots_) s.bytes += imageBytes(slot.desc);
+    for (const Resource& r : resources_) {
+        if (r.imported || r.slot == UINT32_MAX) continue;
+        ++s.images;
+        s.unsharedBytes += imageBytes(r.desc);
+    }
+    return s;
+}
+
 std::vector<nvrhi::CommandListHandle> RenderGraph::execute(nvrhi::CommandListHandle first, GraphRuntime& runtime) {
     parallelChunks_ = 0;
     lists_.clear();
     lists_.push_back(first);
-    // Transients come from the pool (recycled per frame slot).
+    compile(runtime.shareTransients);
+    // A texture from the pool per slot; the images in it take turns.
+    std::vector<const PooledImage*> textures(slots_.size());
+    for (std::size_t s = 0; s < slots_.size(); ++s) {
+        const TransientImageDesc& d = slots_[s].desc;
+        textures[s] = &runtime.pool->acquire(d.format, d.width, d.height, resources_[slots_[s].firstImage].name.c_str(), d.storage,
+                                             d.depth);
+    }
     for (Resource& r : resources_) {
         if (r.imported) continue;
-        const PooledImage& image =
-            runtime.pool->acquire(r.desc.format, r.desc.width, r.desc.height, r.name.c_str(), r.desc.storage, r.desc.depth);
-        r.physical.texture = image.texture;
-        r.physical.bindlessIndex = image.bindlessIndex;
+        r.physical = {};
+        if (r.slot == UINT32_MAX) continue;
+        r.physical.texture = textures[r.slot]->texture;
+        r.physical.bindlessIndex = textures[r.slot]->bindlessIndex;
     }
     for (std::uint32_t p = 0; p < passes_.size(); ++p) {
         Pass& pass = passes_[p];
+        if (!pass.runs) continue;
         nvrhi::ICommandList* cmd = lists_.back();
         const std::uint32_t scope = runtime.profiler != nullptr ? runtime.profiler->beginScope(cmd, pass.name) : UINT32_MAX;
         PassContext ctx(*this, runtime, p);

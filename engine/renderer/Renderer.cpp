@@ -110,13 +110,16 @@ void PresentTarget::setPolicy(rhi::PresentPolicy policy) noexcept {
     }
 }
 
+// A pooled texture is freed after that many frames without use: none of them may be in flight.
+static_assert(TransientImagePool::kMaxIdleFrames > Renderer::kFramesInFlight);
+
 Renderer::Renderer(RenderContext& context)
     : ctx_(context), sceneRenderer_(context), start_(std::chrono::steady_clock::now()) {
     nvrhi::IDevice* gpu = ctx_.gpu();
+    transients_ = std::make_unique<TransientImagePool>(gpu, ctx_.bindless());
     for (FrameResources& f : frames_) {
         f.done = gpu->createEventQuery();
         if (ctx_.backend() == GraphicsBackend::Vulkan) f.acquired = rhi::createBinarySemaphore(ctx_.device(), "ImageAcquired");
-        f.transients = std::make_unique<TransientImagePool>(gpu, ctx_.bindless());
         f.profiler = std::make_unique<GpuProfiler>(gpu, ctx_.caps().timestamps);
     }
 }
@@ -128,10 +131,8 @@ Renderer::~Renderer() {
         log::error("Renderer", "shutdown wait failed: {}", e.what());
     }
     framebuffers_.clear();
-    for (FrameResources& f : frames_) {
-        f.transients.reset();
-        f.lists.clear();
-    }
+    transients_.reset();
+    for (FrameResources& f : frames_) f.lists.clear();
     ctx_.gpu()->runGarbageCollection();
 }
 
@@ -170,7 +171,7 @@ FrameResources& Renderer::beginFrame() {
     FrameResources& frame = frames_[slot_];
     if (frame.pending) finish(frame);
     frame.usedLists = 0;
-    frame.transients->beginFrame();
+    transients_->beginFrame();
     framebuffers_.prune(frameNumber_);
     ctx_.gpu()->runGarbageCollection();
     return frame;
@@ -198,7 +199,8 @@ std::vector<nvrhi::CommandListHandle> Renderer::record(FrameResources& frame, co
     if (extraPasses) extraPasses(graph, out);
     GraphRuntime runtime;
     runtime.device = gpu;
-    runtime.pool = frame.transients.get();
+    runtime.pool = transients_.get();
+    runtime.shareTransients = settings.shareTransientTextures;
     runtime.profiler = frame.profiler.get();
     runtime.framebuffers = &framebuffers_;
     runtime.frameBindings = frame.bindingSet(gpu, ctx_.frameLayout(), ctx_.samplers());
@@ -208,6 +210,10 @@ std::vector<nvrhi::CommandListHandle> Renderer::record(FrameResources& frame, co
     runtime.newList = [&frame, gpu] { return frame.nextList(gpu); };
     runtime.maxThreads = std::min(JobSystem::global().workerCount() + 1, kMaxRecordingThreads);
     std::vector<nvrhi::CommandListHandle> lists = graph.execute(first, runtime);
+    stats_.graphPasses = static_cast<std::uint32_t>(graph.passCount());
+    stats_.graphPassesCulled = graph.culledCount();
+    stats_.transients = graph.transientStats();
+    stats_.transientPoolBytes = transients_->bytes();
     frame.profiler->endFrame(lists.back());
     lists.back()->close();
     return lists;

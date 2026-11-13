@@ -16,6 +16,21 @@ void TransientImagePool::clear() {
     images_.clear();
 }
 
+std::uint64_t imageBytes(nvrhi::Format format, std::uint32_t width, std::uint32_t height, std::uint32_t depth) {
+    const nvrhi::FormatInfo& info = nvrhi::getFormatInfo(format);
+    const std::uint64_t block = std::max<std::uint64_t>(info.blockSize, 1);
+    return (width + block - 1) / block * ((height + block - 1) / block) * std::max(depth, 1u) * info.bytesPerBlock;
+}
+
+std::uint64_t TransientImagePool::bytes() const {
+    std::uint64_t total = 0;
+    for (const auto& image : images_) {
+        const nvrhi::TextureDesc& d = image->texture->getDesc();
+        total += imageBytes(d.format, d.width, d.height, d.depth);
+    }
+    return total;
+}
+
 void TransientImagePool::beginFrame() {
     for (auto it = images_.begin(); it != images_.end();) {
         PooledImage& image = **it;

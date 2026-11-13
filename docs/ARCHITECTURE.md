@@ -94,11 +94,12 @@ which were checked against the SPIR-V decorations glslc emits.
 ```
 Renderer::render(target, scene, camera, settings)
   ├─ recreate swapchain if resized / suboptimal
-  ├─ wait for this slot's fence → resolve GPU timestamps → recycle transient images
+  ├─ wait for this slot's fence → resolve GPU timestamps → free transient textures idle for 8 frames
   ├─ acquire image (20 ms timeout: Timeout → skip frame, UI thread never stalls)
   ├─ record:  RenderGraph
   │     SunShadow (4 cascades → atlas) → Sky → Opaque PBR (samples atlas) → Grid → Tonemap → [Readback]
-  │     graph: realise transients from the slot's pool, plan barriers, begin/end dynamic rendering,
+  │     graph: cull passes nothing needs, give transients textures (shared when their lives do
+  │            not overlap) from the pool, plan barriers, begin/end dynamic rendering,
   │            debug labels, timestamps per pass
   ├─ submit2: wait acquire (COLOR_ATTACHMENT_OUTPUT) + upload timeline value; signal per-image
   │           present semaphore; fence
@@ -140,9 +141,21 @@ start each frame undefined (`discard`). Imported images carry an initial state; 
 swapchain image that is `COLOR_ATTACHMENT_OUTPUT`, so the first barrier chains with the acquire
 semaphore wait. Imported images can also carry a final usage (`Present`).
 
-Transient images come from a per-frame-slot pool. An image is reused only after that slot's fence
-has signalled, which removes cross-frame hazards without extra barriers. Sampled transients are
-registered in the bindless table automatically.
+Before recording, `RenderGraph::compile()` decides what runs. Walking back from the last pass, a
+pass runs when it writes an imported image, an image a later running pass reads (sampled,
+copied, storage, or an attachment it loads), no image at all (its effects, such as a readback,
+are outside the graph), or it called `keepAlways()`. The rest are culled and their images get no
+texture. Each transient image then lives from its first to its last running pass; images of the
+same size and format whose lives do not overlap share a texture, made for storage if any of them
+needs it. At 1920x1080 with SSR, depth of field, motion blur, bloom, AO and cascaded shadows, the
+20 images take 17 textures, 169 MiB instead of 216 MiB. `RenderSettings::shareTransientTextures`
+turns sharing off (a test compares both frames), and the profiler panel shows the counts.
+
+The textures come from one `TransientImagePool` shared by the frames in flight. They run one after
+another on the GPU's queue, every pass moves its images into the state it needs (a barrier after
+the previous frame's use), and a texture is freed only after `kMaxIdleFrames` frames without use,
+so no frame in flight still has it. A pool per frame slot held every texture twice. Sampled
+transients are registered in the bindless table automatically.
 
 Compute passes (`addComputePass`) declare their storage images with `writeStorage`; the graph
 binds them in order as one set (`RenderGraph::kStorageSlots` slots, unused ones filled with a 1x1
@@ -151,7 +164,8 @@ bindless layouts after the regular sets); they `#define LUMORA_COMPUTE` before `
 A transient used that way is created with `storage = true` (unordered access). Shaders name the
 storage format with glslang's `[[spv::format_rgba16f]]` style attribute.
 
-Not yet implemented: pass culling, resource aliasing and async-compute scheduling.
+Not yet implemented: sharing memory between images of different formats (placed resources) and
+async-compute scheduling.
 
 ### Uploads
 
@@ -409,7 +423,7 @@ colour.
 |---|---|
 | Core / scene / serialization / project / CLI | Logic, file formats, error paths (corrupt or missing files, cycles, duplicate UUIDs) |
 | Primitives | Index validity, unit normals, **CCW winding per triangle**, bounds |
-| RenderGraph | Barrier planning for typical frames and hazard types |
+| RenderGraph | Pass culling (what nothing reads, what keeps itself, readbacks) and which images share textures |
 | Renderer (GPU) | Renders real frames offscreen and asserts on pixels: a lit cube against sky, back-face culling, frustum culling counts. Skipped when no Vulkan 1.4 device exists |
 | UI (offscreen QPA) | Hub → Editor → Hub, hierarchy editing, reparent + save round trip, play-mode isolation, reflection-built inspector, two editors sharing a live session |
 | Scene patches | Every kind of edit round-trips, partial records, reorders, concurrent field merges, deletion wins, malformed input |

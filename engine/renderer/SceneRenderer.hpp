@@ -92,6 +92,9 @@ struct RenderSettings {
     /// Levels of detail: imported meshes switch to simpler versions as they get smaller on
     /// screen. Larger values keep detail longer; 0 always draws full detail.
     float lodBias = 1.0f;
+    /// The frame's intermediate images share textures when they are not needed at the same time
+    /// (less video memory). False gives each its own (for comparing, or hunting a bad pass).
+    bool shareTransientTextures = true;
 };
 
 struct SceneDrawStats {

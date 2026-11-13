@@ -2,7 +2,6 @@
 
 #include "renderer/GpuProfiler.hpp"
 #include "renderer/MeshCache.hpp"
-#include "renderer/TransientImagePool.hpp"
 #include "renderer/vulkan/Resources.hpp"
 
 #include <array>
@@ -45,7 +44,6 @@ struct FrameResources {
     nvrhi::BindingSetHandle bindings;  // set 0 over the buffers above
     std::array<nvrhi::IBuffer*, 5> bound{};
 
-    std::unique_ptr<TransientImagePool> transients;
     std::unique_ptr<GpuProfiler> profiler;
 
     /// An open command list of this frame (reused across frames).

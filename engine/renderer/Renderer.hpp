@@ -5,6 +5,7 @@
 #include "renderer/FrameResources.hpp"
 #include "renderer/GpuProfiler.hpp"
 #include "renderer/SceneRenderer.hpp"
+#include "renderer/TransientImagePool.hpp"
 #include "renderer/d3d12/D3D12Context.hpp"
 #include "renderer/vulkan/Device.hpp"
 #include "renderer/vulkan/Swapchain.hpp"
@@ -26,6 +27,10 @@ struct FrameStats {
     double gpuFrameMs = 0.0;              // from timestamps, kFramesInFlight frames old
     std::vector<GpuTiming> gpuPasses;
     SceneDrawStats scene;
+    std::uint32_t graphPasses = 0;           // declared in the render graph
+    std::uint32_t graphPassesCulled = 0;     // of those, skipped: nothing used what they write
+    RenderGraph::TransientStats transients;  // the frame's transient images and their textures
+    std::uint64_t transientPoolBytes = 0;    // every pooled transient texture, idle ones too
     rhi::Device::MemoryUsage vram;
     VkExtent2D extent{};
 };
@@ -123,6 +128,7 @@ private:
     SceneRenderer sceneRenderer_;
     FramebufferCache framebuffers_;
     std::array<FrameResources, kFramesInFlight> frames_;
+    std::unique_ptr<TransientImagePool> transients_;  // shared by the frames in flight
     std::uint32_t slot_ = 0;
     std::uint64_t frameNumber_ = 0;
     FrameStats stats_;

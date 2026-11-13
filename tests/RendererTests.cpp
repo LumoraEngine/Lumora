@@ -1102,6 +1102,59 @@ TEST_F(RendererTest, ColorGradingDepthOfFieldAndSunShafts) {
     EXPECT_GT(total(*withShafts), total(*noShafts) * 1.02) << "shafts add light";
 }
 
+TEST_F(RendererTest, TransientImagesShareTexturesWithoutChangingTheFrame) {
+    // Many effects at once, each with images of its own: with and without sharing textures
+    // between images that are not alive together, the frame must come out the same.
+    auto scene = sceneWithSun();
+    scene->environment().autoExposure = false;  // adapts from frame to frame
+    scene->environment().dofBlur = 6.0f;
+    scene->environment().focusDistance = 3.0f;
+    scene->environment().sunShafts = 1.0f;
+    scene->environment().motionBlur = 1.0f;
+    const auto cube = scene->createEntity("Cube");
+    scene->registry().emplace<MeshRendererComponent>(cube).baseColor = {0.9f, 0.1f, 0.1f};
+    const auto floor = scene->createEntity("Floor");
+    auto& fm = scene->registry().emplace<MeshRendererComponent>(floor);
+    fm.mesh = MeshPrimitive::Plane;
+    fm.pattern = SurfacePattern::Checker;
+    fm.metallic = 0.8f;
+    fm.roughness = 0.1f;
+    scene->registry().get<TransformComponent>(floor).position.y = -0.5f;
+    scene->registry().get<TransformComponent>(floor).scale = glm::vec3(40.0f, 1.0f, 40.0f);
+    scene->updateWorldTransforms();
+    FlyCameraController cam;
+    cam.setPosition({0.0f, 1.0f, 3.0f});
+    cam.lookAt({0.0f, 0.0f, 0.0f});
+    const glm::uvec2 size(128, 96);
+    const CameraView view = cam.view(static_cast<float>(size.x) / static_cast<float>(size.y));
+    RenderSettings settings;
+    settings.screenSpaceReflections = true;
+    settings.virtualShadows = false;  // its pages follow GPU requests from earlier frames
+
+    settings.shareTransientTextures = false;
+    auto apart = renderer_->capture(*scene, view, {size.x, size.y}, settings);
+    ASSERT_TRUE(apart.has_value());
+    const FrameStats unshared = renderer_->stats();
+    settings.shareTransientTextures = true;
+    auto shared = renderer_->capture(*scene, view, {size.x, size.y}, settings);
+    ASSERT_TRUE(shared.has_value());
+    const FrameStats stats = renderer_->stats();
+
+    ASSERT_TRUE(stats.scene.screenSpaceReflections && stats.scene.motionBlur && stats.scene.ambientOcclusion);
+    EXPECT_EQ(stats.graphPassesCulled, 0u) << "every pass of a frame contributes to it";
+    EXPECT_EQ(unshared.transients.textures, unshared.transients.images);
+    EXPECT_EQ(stats.transients.images, unshared.transients.images);
+    EXPECT_LT(stats.transients.textures, stats.transients.images);
+    // The post-processing images take the textures of the surface images SSR is done with
+    // (each of these at least as large as the scene's colour).
+    EXPECT_GE(stats.transients.unsharedBytes - stats.transients.bytes, 3 * imageBytes(context_->hdrFormat(), size.x, size.y));
+    const auto centre = pixel(*shared, size.x / 2, size.y / 2);
+    ASSERT_GT(int(centre.r), int(centre.g) + 30) << "the red cube in focus";
+    int worst = 0;
+    for (std::size_t i = 0; i < shared->rgba.size(); ++i) worst = std::max(worst, std::abs(int(shared->rgba[i]) - int(apart->rgba[i])));
+    EXPECT_LE(worst, 1) << "an image read before its pass wrote it, or written while another used its texture";
+}
+
 TEST_F(RendererTest, DecalsTintTheSurfacesInsideTheirBox) {
     auto scene = sceneWithSun();
     scene->environment().fogDensity = 0.0f;

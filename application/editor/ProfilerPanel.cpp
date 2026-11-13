@@ -141,14 +141,23 @@ void ProfilerPanel::refresh() {
     if (s == nullptr) return;
     cpu_->setText(QStringLiteral("%1 ms").arg(s->cpuRecordMs, 0, 'f', 3));
     gpu_->setText(s->gpuFrameMs > 0.0 ? QStringLiteral("%1 ms").arg(s->gpuFrameMs, 0, 'f', 3) : tr("n/a"));
-    scene_->setText(tr("%1 draws · %2 tris · %3 visible · %4 culled · %5 lights · %6×%7")
+    constexpr double kMiB = 1024.0 * 1024.0;
+    scene_->setText(tr("%1 draws · %2 tris · %3 visible · %4 culled · %5 lights · %6×%7\n"
+                       "%8 passes (%9 culled) · %10 images in %11 textures · %12 MiB (%13 MiB unshared, %14 MiB pooled)")
                         .arg(s->scene.drawCalls)
                         .arg(s->scene.triangles)
                         .arg(s->scene.visibleObjects)
                         .arg(s->scene.culledObjects)
                         .arg(s->scene.lights)
                         .arg(s->extent.width)
-                        .arg(s->extent.height));
+                        .arg(s->extent.height)
+                        .arg(s->graphPasses)
+                        .arg(s->graphPassesCulled)
+                        .arg(s->transients.images)
+                        .arg(s->transients.textures)
+                        .arg(static_cast<double>(s->transients.bytes) / kMiB, 0, 'f', 1)
+                        .arg(static_cast<double>(s->transients.unsharedBytes) / kMiB, 0, 'f', 1)
+                        .arg(static_cast<double>(s->transientPoolBytes) / kMiB, 0, 'f', 1));
     scene_->setWordWrap(true);
 
     if (passes_->topLevelItemCount() != static_cast<int>(s->gpuPasses.size())) {
