@@ -226,12 +226,29 @@ void TextureCache::beginFrame() {
         retire(*e);
         ++reduced_;
     }
-    std::ranges::sort(used, [](const Entry* a, const Entry* b) { return a->mips->bytes(a->firstLevel) > b->mips->bytes(b->firstLevel); });
-    for (Entry* e : used) {
-        if (resident <= budget_) return;
-        if (e->firstLevel + 1 >= e->mips->levels.size()) continue;
-        resident -= e->mips->bytes(e->firstLevel) - e->mips->bytes(e->firstLevel + 1);
-        upload(*e, e->firstLevel + 1);
+    // As many levels as it takes this frame (largest first, a level at a time), then one upload
+    // per texture at the level it ends up with.
+    struct Plan {
+        Entry* entry;
+        std::uint32_t level;
+    };
+    std::vector<Plan> plans;
+    plans.reserve(used.size());
+    for (Entry* e : used) plans.push_back({e, e->firstLevel});
+    for (bool progress = true; resident > budget_ && progress;) {
+        progress = false;
+        std::ranges::sort(plans, [](const Plan& a, const Plan& b) { return a.entry->mips->bytes(a.level) > b.entry->mips->bytes(b.level); });
+        for (Plan& p : plans) {
+            if (resident <= budget_) break;
+            if (p.level + 1 >= p.entry->mips->levels.size()) continue;
+            resident -= p.entry->mips->bytes(p.level) - p.entry->mips->bytes(p.level + 1);
+            ++p.level;
+            progress = true;
+        }
+    }
+    for (const Plan& p : plans) {
+        if (p.level == p.entry->firstLevel) continue;
+        upload(*p.entry, p.level);
         ++reduced_;
     }
 }

@@ -2209,14 +2209,15 @@ TEST(TextureCompression, BlockFormatsMipChainsAndCacheFiles) {
         rgba[i * 4 + 3] = 255;
     }
     const TextureMips color = prepareTexture(rgba, 64, 32, TextureKind::Color, true);
-    EXPECT_EQ(color.format, nvrhi::Format::BC1_UNORM_SRGB) << "opaque colour: BC1";
+    EXPECT_EQ(color.format, nvrhi::Format::BC7_UNORM_SRGB) << "colour: BC7";
     ASSERT_EQ(color.levels.size(), 7u);  // 64x32 .. 1x1
-    EXPECT_EQ(color.levels[0].size(), 16u * 8u * 8u) << "4x4 blocks of 8 bytes";
-    EXPECT_EQ(color.levels.back().size(), 8u) << "a 1x1 level is one block";
+    EXPECT_EQ(color.levels[0].size(), 16u * 8u * 16u) << "4x4 blocks of 16 bytes";
+    EXPECT_EQ(color.levels.back().size(), 16u) << "a 1x1 level is one block";
     EXPECT_EQ(prepareTexture(rgba, 64, 32, TextureKind::Normal, true).format, nvrhi::Format::BC5_UNORM);
+    EXPECT_EQ(prepareTexture(rgba, 64, 32, TextureKind::Data, true).format, nvrhi::Format::BC1_UNORM);
     EXPECT_EQ(prepareTexture(rgba, 64, 32, TextureKind::Color, false).format, nvrhi::Format::SRGBA8_UNORM);
     rgba[3] = 0;
-    EXPECT_EQ(prepareTexture(rgba, 64, 32, TextureKind::Color, true).format, nvrhi::Format::BC3_UNORM_SRGB) << "with alpha: BC3";
+    EXPECT_EQ(prepareTexture(rgba, 64, 32, TextureKind::Color, true).format, nvrhi::Format::BC7_UNORM_SRGB) << "with alpha too";
 
     // A flat colour survives BC1 nearly exactly (decode the block's two 5:6:5 endpoints).
     std::vector<std::uint8_t> flat(4 * 4 * 4);
@@ -2231,6 +2232,38 @@ TEST(TextureCompression, BlockFormatsMipChainsAndCacheFiles) {
     const unsigned c0 = block[0] | (block[1] << 8);
     EXPECT_NEAR(static_cast<int>((c0 >> 11) * 255 / 31), 200, 9);
     EXPECT_NEAR(static_cast<int>(((c0 >> 5) & 63) * 255 / 63), 100, 5);
+
+    // BC7 keeps a gradient with alpha far closer than BC1/BC3 would (both ends of every block
+    // exact to a few levels), and decodes back to the same size.
+    std::vector<std::uint8_t> gradient(64 * 64 * 4);
+    for (std::uint32_t y = 0; y < 64; ++y) {
+        for (std::uint32_t x = 0; x < 64; ++x) {
+            std::uint8_t* t = &gradient[(y * 64 + x) * 4];
+            t[0] = static_cast<std::uint8_t>(x * 4);
+            t[1] = static_cast<std::uint8_t>(y * 4);
+            t[2] = static_cast<std::uint8_t>((x + y) * 2);
+            t[3] = static_cast<std::uint8_t>(255 - x * 2);
+        }
+    }
+    const auto bc7 = compressBlocks(gradient, 64, 64, nvrhi::Format::BC7_UNORM_SRGB);
+    ASSERT_EQ(bc7.size(), 16u * 16u * 16u);
+    const auto decoded = decodeBc7(bc7, 64, 64);
+    ASSERT_EQ(decoded.size(), gradient.size());
+    double squared = 0.0;
+    for (std::size_t i = 0; i < decoded.size(); ++i) squared += (decoded[i] - gradient[i]) * (decoded[i] - gradient[i]);
+    const double psnr = 10.0 * std::log10(255.0 * 255.0 / std::max(squared / static_cast<double>(decoded.size()), 1e-9));
+    EXPECT_GT(psnr, 40.0) << "a smooth gradient with alpha";
+
+    // On a photograph (Kodak 23): BC1 keeps about 38.5 dB, BC7 about 45.
+    auto photo = loadImageFile(std::filesystem::path(LUMORA_TEST_BASISU_DIR) / "test_files" / "kodim23.png");
+    ASSERT_TRUE(photo.has_value()) << photo.error().message;
+    const auto photoBlocks = compressBlocks(photo->rgba, photo->width, photo->height, nvrhi::Format::BC7_UNORM_SRGB);
+    const auto photoBack = decodeBc7(photoBlocks, photo->width, photo->height);
+    double photoError = 0.0;
+    for (std::size_t i = 0; i < photoBack.size(); i += 4) {
+        for (int c = 0; c < 3; ++c) photoError += std::pow(photoBack[i + c] - photo->rgba[i + c], 2.0);
+    }
+    EXPECT_GT(10.0 * std::log10(255.0 * 255.0 / (photoError / static_cast<double>(photoBack.size() / 4 * 3))), 44.0);
 
     test::TempDir dir;
     const auto file = dir.path() / "Saved" / "TextureCache" / "a.ltex";
@@ -2274,7 +2307,7 @@ TEST_F(RendererTest, TexturesAreCompressedCachedAndStreamed) {
     EXPECT_EQ(cache.stats().streamedIn, 1u);
     const std::uint32_t near = cache.index(assets, "Content/Textures/big.png", TextureKind::Color, true, 4096.0f);
     EXPECT_NE(near, far);
-    EXPECT_GT(cache.stats().residentBytes, std::size_t{512} << 10) << "1024x1024 BC1 is 512 KiB plus mips";
+    EXPECT_GT(cache.stats().residentBytes, std::size_t{1} << 20) << "1024x1024 BC7 is 1 MiB plus mips";
 
     // Over budget: the finest mips go.
     cache.setBudget(std::size_t{200} << 10);

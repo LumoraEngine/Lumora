@@ -20,7 +20,7 @@ class RenderContext;
 
 /// GPU textures for material maps, keyed by canonical (absolute) asset key and kind.
 ///
-/// - Compression: colour maps become BC1 (BC3 with alpha, sRGB), data maps BC1, normal maps
+/// - Compression: colour maps become BC7 (sRGB, with or without alpha), data maps BC1, normal maps
 ///   BC5, with their whole mip chain, on the job system the first time; the result is kept in
 ///   <project>/Saved/TextureCache/ (keyed by the file, its size and time), so later runs upload
 ///   at once. Without BC support on the GPU, RGBA8.

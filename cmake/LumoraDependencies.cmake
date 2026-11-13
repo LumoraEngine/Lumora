@@ -276,6 +276,25 @@ add_library(lumora_tinyexr INTERFACE)
 target_include_directories(lumora_tinyexr SYSTEM INTERFACE ${tinyexr_SOURCE_DIR})
 target_link_libraries(lumora_tinyexr INTERFACE lumora_miniz)
 
+# bc7enc (bc7enc_rdo at a pinned commit, MIT or public domain): BC7 encoding of colour maps, and its
+# decoder for tests. The RDO encoder, ISPC kernels and tools are not needed.
+lumora_fetch_files(bc7enc https://raw.githubusercontent.com/richgel999/bc7enc_rdo/b9438627eef73a1157e84201b6fa6eb2ffd6d9f0
+    LICENSE b3e843763e8d3bdeb0f469ecd4107fc32b5fa27ebee1af10d2066bc339292800
+    bc7enc.h f40f4a956ed6a8845b7909e83831de09512424408b32ca29551bf49aee2fecf6
+    bc7enc.cpp b90444a091530a13c61fa6375583fcc9bc9ca47e474fd71f818876de68c1b581
+    bc7decomp.h cbba8778640e0021f55ca686b6bc19e6960032539084c70af698922b05c5b242
+    bc7decomp.cpp cfbe156926ebd96443b4407a9da1b5b7a424fdf989fedca3cf2fd0515e0c368a)
+add_library(lumora_bc7enc STATIC ${bc7enc_SOURCE_DIR}/bc7enc.cpp ${bc7enc_SOURCE_DIR}/bc7decomp.cpp)
+target_include_directories(lumora_bc7enc SYSTEM PUBLIC ${bc7enc_SOURCE_DIR})
+set_target_properties(lumora_bc7enc PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Optimised in Debug builds too (GCC/Clang; MSVC's /RTC1 forbids /O2): the editor compresses
+# every colour map with it on first use.
+if(MSVC)
+    target_compile_options(lumora_bc7enc PRIVATE /W0)
+else()
+    target_compile_options(lumora_bc7enc PRIVATE -w $<$<CONFIG:Debug>:-O2>)
+endif()
+
 # ufbx 0.23.1 (MIT or public domain): FBX and Wavefront OBJ (+ MTL) import. One C file.
 lumora_fetch_files(ufbx https://raw.githubusercontent.com/ufbx/ufbx/v0.23.1
     LICENSE 0dd48ebadf52273c736256325c8f078c03c8bb4facee22a4122de0ad3f615391

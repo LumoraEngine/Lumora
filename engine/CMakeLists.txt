@@ -124,7 +124,7 @@ const std::size_t kHudFontSize = sizeof(kHudFont);
 }
 ")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${LUMORA_HUD_FONT})
-target_link_libraries(lumora_renderer PRIVATE stb)
+target_link_libraries(lumora_renderer PRIVATE stb lumora_bc7enc)
 
 # Direct3D 12 back end (Windows): NVRHI's D3D12 library and the system's D3D12 / DXGI.
 if(LUMORA_WITH_D3D12)

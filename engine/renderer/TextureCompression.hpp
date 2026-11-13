@@ -14,7 +14,7 @@ namespace lumora::render {
 
 /// What a material map holds, which decides how it is stored on the GPU.
 enum class TextureKind {
-    Color,   // base colour, emissive: sRGB; BC1, or BC3 with alpha
+    Color,   // base colour, emissive: sRGB BC7 (with or without alpha)
     Data,    // metallic-roughness, occlusion: linear BC1
     Normal,  // tangent-space normals: BC5 (x, y; the shader rebuilds z)
 };
@@ -34,10 +34,13 @@ struct TextureMips {
 /// The block format for a map (RGBA8 when the GPU has no BC support).
 [[nodiscard]] nvrhi::Format textureFormat(TextureKind kind, bool hasAlpha, bool blockCompression);
 
-/// Compresses one RGBA8 image (rows top to bottom) into BC1, BC3, BC4 (red) or BC5 (red, green)
-/// blocks; edges are padded by repeating the last texel.
+/// Compresses one RGBA8 image (rows top to bottom) into BC1, BC3, BC4 (red), BC5 (red, green) or
+/// BC7 blocks; edges are padded by repeating the last texel.
 [[nodiscard]] std::vector<std::uint8_t> compressBlocks(std::span<const std::uint8_t> rgba, std::uint32_t width,
                                                        std::uint32_t height, nvrhi::Format format);
+
+/// BC7 blocks back to RGBA8 (rows top to bottom); empty if there are too few blocks.
+[[nodiscard]] std::vector<std::uint8_t> decodeBc7(std::span<const std::uint8_t> blocks, std::uint32_t width, std::uint32_t height);
 
 /// Mip chain (alpha-coverage preserving where there is transparency) in the kind's format.
 [[nodiscard]] TextureMips prepareTexture(std::span<const std::uint8_t> rgba, std::uint32_t width, std::uint32_t height,
@@ -48,7 +51,7 @@ struct TextureMips {
 [[nodiscard]] Result<TextureMips> loadTextureMips(const std::filesystem::path& file);
 
 /// Raised whenever prepareTexture() gives different results: old .ltex files are ignored.
-inline constexpr std::uint32_t kTexturePreparationVersion = 1;
+inline constexpr std::uint32_t kTexturePreparationVersion = 2;  // 2: colour maps in BC7
 
 /// "|color", "|data" or "|normal": appended to texture keys in cache identities.
 [[nodiscard]] const char* textureKindSuffix(TextureKind kind);

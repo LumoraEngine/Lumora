@@ -6,9 +6,13 @@
 #define STB_DXT_IMPLEMENTATION
 #include <stb_dxt.h>
 
+#include <bc7decomp.h>
+#include <bc7enc.h>
+
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <mutex>
 
 namespace lumora::render {
 
@@ -28,6 +32,8 @@ bool knownFormat(nvrhi::Format f) {
         case nvrhi::Format::BC3_UNORM_SRGB:
         case nvrhi::Format::BC4_UNORM:
         case nvrhi::Format::BC5_UNORM:
+        case nvrhi::Format::BC7_UNORM:
+        case nvrhi::Format::BC7_UNORM_SRGB:
         case nvrhi::Format::RGBA8_UNORM:
         case nvrhi::Format::SRGBA8_UNORM:
             return true;
@@ -39,6 +45,20 @@ bool knownFormat(nvrhi::Format f) {
 std::size_t levelBytes(nvrhi::Format format, std::uint32_t w, std::uint32_t h) {
     if (format == nvrhi::Format::RGBA8_UNORM || format == nvrhi::Format::SRGBA8_UNORM) return static_cast<std::size_t>(w) * h * 4;
     return static_cast<std::size_t>((w + 3) / 4) * ((h + 3) / 4) * blockBytes(format);
+}
+
+/// bc7enc's settings for colour maps: perceptual (YCbCr) error, the 16 likeliest mode 1
+/// partitions (all 64 gain 0.05 dB on a photo for 20% more time), the fastest "uber" level.
+/// Its tables are built once.
+const bc7enc_compress_block_params& bc7Params() {
+    static bc7enc_compress_block_params params;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        bc7enc_compress_block_init();
+        bc7enc_compress_block_params_init(&params);
+        params.m_max_partitions = 16;
+    });
+    return params;
 }
 
 /// FNV-1a over the bytes of a string, then 64-bit values.
@@ -76,6 +96,24 @@ std::filesystem::path textureCacheFile(const std::filesystem::path& root, std::s
     return root / "Saved" / "TextureCache" / std::format("{:016x}.ltex", f.h);
 }
 
+std::vector<std::uint8_t> decodeBc7(std::span<const std::uint8_t> blocks, std::uint32_t width, std::uint32_t height) {
+    const std::uint32_t bx = (width + 3) / 4, by = (height + 3) / 4;
+    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width) * height * 4);
+    if (blocks.size() < static_cast<std::size_t>(bx) * by * 16) return {};
+    for (std::uint32_t y = 0; y < by; ++y) {
+        for (std::uint32_t x = 0; x < bx; ++x) {
+            bc7decomp::color_rgba texels[16];
+            bc7decomp::unpack_bc7(&blocks[(static_cast<std::size_t>(y) * bx + x) * 16], texels);
+            for (std::uint32_t j = 0; j < 4 && y * 4 + j < height; ++j) {
+                for (std::uint32_t i = 0; i < 4 && x * 4 + i < width; ++i) {
+                    std::memcpy(&rgba[((static_cast<std::size_t>(y) * 4 + j) * width + x * 4 + i) * 4], texels[j * 4 + i].m_comps, 4);
+                }
+            }
+        }
+    }
+    return rgba;
+}
+
 std::string relativeTextureKey(const std::filesystem::path& root, std::string_view canonical) {
     if (root.empty()) return {};
     const auto hash = canonical.find('#');
@@ -106,7 +144,7 @@ std::size_t TextureMips::bytes(std::uint32_t firstLevel) const {
 nvrhi::Format textureFormat(TextureKind kind, bool hasAlpha, bool blockCompression) {
     if (!blockCompression) return kind == TextureKind::Color ? nvrhi::Format::SRGBA8_UNORM : nvrhi::Format::RGBA8_UNORM;
     switch (kind) {
-        case TextureKind::Color: return hasAlpha ? nvrhi::Format::BC3_UNORM_SRGB : nvrhi::Format::BC1_UNORM_SRGB;
+        case TextureKind::Color: return nvrhi::Format::BC7_UNORM_SRGB;  // with or without alpha
         case TextureKind::Data: return nvrhi::Format::BC1_UNORM;
         case TextureKind::Normal: return nvrhi::Format::BC5_UNORM;
     }
@@ -117,6 +155,8 @@ std::vector<std::uint8_t> compressBlocks(std::span<const std::uint8_t> rgba, std
                                          nvrhi::Format format) {
     const std::uint32_t bx = (width + 3) / 4, by = (height + 3) / 4;
     const std::uint32_t size = blockBytes(format);
+    const bool bc7 = format == nvrhi::Format::BC7_UNORM || format == nvrhi::Format::BC7_UNORM_SRGB;
+    const bc7enc_compress_block_params* params = bc7 ? &bc7Params() : nullptr;
     std::vector<std::uint8_t> out(static_cast<std::size_t>(bx) * by * size);
     auto row = [&](std::uint32_t y0, std::uint32_t y1) {
         for (std::uint32_t y = y0; y < y1; ++y) {
@@ -137,6 +177,10 @@ std::vector<std::uint8_t> compressBlocks(std::span<const std::uint8_t> rgba, std
                     case nvrhi::Format::BC3_UNORM:
                     case nvrhi::Format::BC3_UNORM_SRGB:
                         stb_compress_dxt_block(dst, block, 1, STB_DXT_HIGHQUAL);
+                        break;
+                    case nvrhi::Format::BC7_UNORM:
+                    case nvrhi::Format::BC7_UNORM_SRGB:
+                        bc7enc_compress_block(dst, block, params);
                         break;
                     case nvrhi::Format::BC4_UNORM: {
                         unsigned char red[16];
