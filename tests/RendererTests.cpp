@@ -3110,3 +3110,50 @@ TEST_F(RendererTest, SeeThroughLeavesCastCutOutShadows) {
     mesh.baseColorTexture = "Content/Textures/solid.png";
     EXPECT_LT(shade(), 0.6f) << "a solid one does";
 }
+
+TEST_F(RendererTest, CachedShadowPagesRedrawCutOutCastersOnceTheirMapLoads) {
+    // While its map loads, a cut-out card casts a solid shadow into the virtual shadow map's
+    // cached pages. Once the map is there, those pages must be drawn again with the holes.
+    test::TempDir project;
+    std::filesystem::create_directories(project.path() / "Content" / "Textures");
+    std::vector<std::uint8_t> rgba(64 * 64 * 4, 0);  // fully clear: the card casts nothing
+    ASSERT_NE(stbi_write_png((project.path() / "Content" / "Textures" / "clear.png").string().c_str(), 64, 64, 4, rgba.data(), 64 * 4), 0);
+    AssetLibrary assets(project.path());
+    auto scene = shadowScene();
+    const auto e = scene->createEntity("Card");
+    auto& mesh = scene->registry().emplace<MeshRendererComponent>(e);
+    mesh.mesh = MeshPrimitive::Plane;
+    mesh.baseColorTexture = "Content/Textures/clear.png";
+    mesh.alphaCutoff = 0.5f;
+    scene->registry().get<TransformComponent>(e).position = {0.0f, 2.0f, 0.0f};
+    scene->registry().get<TransformComponent>(e).scale = glm::vec3(1.5f, 1.0f, 1.5f);
+    scene->updateWorldTransforms();
+    const glm::uvec2 size(160, 120);
+    FlyCameraController cam;
+    cam.setPosition({0.0f, 5.0f, 5.0f});
+    cam.lookAt({0.0f, 0.0f, -1.0f});
+    const CameraView view = cam.view(static_cast<float>(size.x) / static_cast<float>(size.y));
+    const glm::vec3 shadowAt = glm::vec3(0.0f, 2.0f, 0.0f) + glm::vec3(0.0f, -2.0f, -2.0f / std::tan(glm::radians(60.0f)));
+    auto darkness = [&](const CapturedImage& image) {
+        const glm::ivec2 shadow = toPixel(view, shadowAt, size);
+        const glm::ivec2 lit = toPixel(view, {0.0f, 0.0f, 2.5f}, size);
+        return luminance(pixel(image, shadow.x, shadow.y)) / std::max(luminance(pixel(image, lit.x, lit.y)), 1.0f);
+    };
+    RenderSettings settings;
+    settings.assets = &assets;
+    settings.blockOnAssets = false;  // as in a viewport: untextured until decoded
+    settings.virtualShadows = true;
+    settings.virtualShadowGpuRequests = false;  // the same pages every frame: only the cache decides
+    settings.virtualShadowPageBudget = 0;
+    auto first = renderer_->capture(*scene, view, {size.x, size.y}, settings);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(renderer_->stats().scene.virtualShadows);
+    EXPECT_LT(darkness(*first), 0.6f) << "no map yet: a solid card";
+    std::optional<CapturedImage> later;
+    for (int i = 0; i < 20; ++i) {
+        assets.waitIdle();
+        later = *renderer_->capture(*scene, view, {size.x, size.y}, settings);
+    }
+    EXPECT_LT(renderer_->stats().scene.virtualPagesRendered, renderer_->stats().scene.virtualPagesRequested) << "pages are cached";
+    EXPECT_GT(darkness(*later), 0.85f) << "the map arrived: the cached pages show the holes";
+}

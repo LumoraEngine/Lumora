@@ -61,8 +61,9 @@ const GpuMesh* MeshCache::asset(AssetLibrary& library, const std::string& key, b
         gpu.skin = ctx_.createBuffer(std::as_bytes(std::span(data.skin)), true, false, (name + ".skin").c_str());
     }
     // Levels of detail share the vertex (and skin) buffers; each has its own indices.
-    for (const MeshLod& lod : buildLods(data)) {
+    for (const MeshLod& lod : mesh->lods) {
         GpuMesh level;
+        level.lodError = lod.error;
         level.vertices = gpu.vertices;
         level.skin = gpu.skin;
         level.bounds = gpu.bounds;

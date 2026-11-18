@@ -28,6 +28,7 @@ struct GpuMesh {
     nvrhi::BufferHandle skin;  // lumora::SkinVertex per vertex, when the mesh is skinned
     /// Coarser levels of detail (LOD1...): the same vertices, fewer triangles (MeshLod.hpp).
     std::vector<GpuMesh> lods;
+    float lodError = 0.0f;  // a level's: how far its surface moved, relative to the bounds' largest side
     [[nodiscard]] bool skinned() const noexcept { return skin != nullptr; }
     /// The mesh to draw at `level` (0 = this one; clamped to the coarsest level).
     [[nodiscard]] const GpuMesh& level(int level) const noexcept {

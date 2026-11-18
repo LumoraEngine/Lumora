@@ -28,6 +28,7 @@
 #include <glm/matrix.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <optional>
@@ -298,14 +299,19 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
             obj.flags.z = static_cast<float>(joints.size());
             obj.flags.w = appendSkinPalette(scene, candidates[i].entity, *candidates[i].mesh, settings.assets, joints) ? 1.0f : 0.0f;
         }
-        // Level of detail from the screen coverage of the bounding sphere (shadows use the same).
+        // Level of detail: the coarsest whose error stays under a pixel on screen (shadows use
+        // the same). Errors are relative to the mesh's largest side: scaled like the object.
         const GpuMesh* drawn = candidates[i].gpuMesh;
         if (!drawn->lods.empty() && settings.lodBias > 0.0f) {
-            const float coverage =
-                screenCoverage(glm::length(p.extent), glm::length(p.center - camera.position), camera.fovYRadians);
-            const int level = selectLod(coverage, static_cast<int>(drawn->lods.size()), settings.lodBias);
-            drawn = &drawn->level(level);
-            if (level > 0 && p.visible) ++stats.lodObjects;
+            const float largestSide = 2.0f * std::max({p.extent.x, p.extent.y, p.extent.z});
+            std::array<float, 8> errors{};
+            const std::size_t levels = std::min(drawn->lods.size(), errors.size());
+            for (std::size_t l = 0; l < levels; ++l) errors[l] = drawn->lods[l].lodError * largestSide;
+            const float pixelsPerUnit = static_cast<float>(extent.height) / (2.0f * std::tan(camera.fovYRadians * 0.5f));
+            const LodChoice lod = selectLod(std::span(errors.data(), levels), glm::length(p.center - camera.position) - glm::length(p.extent),
+                                            pixelsPerUnit, settings.lodBias);
+            drawn = &drawn->level(lod.level);
+            if (lod.level > 0 && p.visible) ++stats.lodObjects;
         }
         std::uint64_t state = std::hash<const void*>{}(drawn);
         for (int col = 0; col < 4; ++col) {
@@ -381,6 +387,11 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
                                 static_cast<float>((twoSided ? 1 : 0) | (transparent ? 2 : 0) | (transmissive ? 4 : 0)),
                                 std::bit_cast<float>(occlusion), lmat != nullptr ? lmat->normalStrength : look.normalStrength);
         const auto variant = static_cast<std::uint8_t>((masked ? kMasked : 0) | (twoSided ? kTwoSided : 0));
+        // Cached shadows (virtual pages, local tiles) are redrawn when this changes: a caster
+        // drawn solid while its map was loading must be drawn again cut out once it is there.
+        const bool mapped = obj.textures.x != kNoTexture || obj.graph.x != kNoTexture;
+        state = (state ^ (variant | (mapped ? 0x10u : 0u) | (transparent ? 0x20u : 0u))) * 1099511628211ull;
+        state = (state ^ std::bit_cast<std::uint32_t>(cutoff)) * 1099511628211ull;
         const Draw draw{drawn,
                         static_cast<std::uint32_t>(objects.size()),
                         p.center,
@@ -396,7 +407,6 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
             }
             // Blended leaves and fences: a cut-out shadow where the map (or graph) makes them at
             // least half opaque. Glass (transmission, or one opacity without a map) casts none.
-            const bool mapped = obj.textures.x != kNoTexture || obj.graph.x != kNoTexture;
             if (anyShadows && mapped && !transmissive && opacity > 0.0f && !candidates[i].gpuMesh->skinned()) {
                 Draw caster = draw;
                 caster.variant = static_cast<std::uint8_t>(kMasked | (twoSided ? kTwoSided : 0));

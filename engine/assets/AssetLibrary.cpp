@@ -1,5 +1,7 @@
 #include "assets/AssetLibrary.hpp"
 
+#include "assets/MeshOptimize.hpp"
+
 #include "assets/AssetImport.hpp"
 
 #include "core/JobSystem.hpp"
@@ -196,6 +198,11 @@ std::function<Result<ImportedModel>()> AssetLibrary::modelLoader(const std::file
             return loaded;
         }
         for (const std::string& w : loaded->warnings) log::warn("Assets", "{}: {}", file.filename().string(), w);
+        // Welded and ordered for the GPU, with levels of detail, here on the loading thread.
+        for (ImportedMesh& mesh : loaded->meshes) {
+            optimizeMesh(mesh.data);
+            mesh.lods = buildLods(mesh.data);
+        }
         log::info("Assets", "loaded {} ({} meshes, {} images, {} nodes) in {:.1f} ms", file.filename().string(),
                   loaded->meshes.size(), loaded->images.size(), loaded->nodes.size(), timer.elapsedMs());
         return loaded;

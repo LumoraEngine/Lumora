@@ -31,6 +31,7 @@ lumora_engine_module(assets
     SOURCES
         assets/Primitives.cpp
         assets/MeshLod.cpp
+        assets/MeshOptimize.cpp
         assets/GltfImporter.cpp
         assets/FbxImporter.cpp
         assets/CgltfImpl.cpp
@@ -42,7 +43,7 @@ lumora_engine_module(assets
         assets/Material.cpp
         assets/MaterialGraph.cpp
     DEPS lumora_core glm::glm cgltf stb nlohmann_json::nlohmann_json)
-target_link_libraries(lumora_assets PRIVATE lumora_webp lumora_basisu lumora_tinyexr lumora_ufbx)
+target_link_libraries(lumora_assets PRIVATE lumora_webp lumora_basisu lumora_tinyexr lumora_ufbx lumora_meshoptimizer)
 set_source_files_properties(assets/ExrImpl.cpp PROPERTIES COMPILE_OPTIONS $<IF:$<CXX_COMPILER_ID:MSVC>,/W0,-w>)
 
 lumora_engine_module(scene

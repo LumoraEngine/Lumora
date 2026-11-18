@@ -1,6 +1,7 @@
 #pragma once
 
 #include "assets/MeshData.hpp"
+#include "assets/MeshLod.hpp"
 #include "assets/TextureTransform.hpp"
 #include "core/Error.hpp"
 
@@ -85,6 +86,7 @@ struct ImportedMesh {
     std::string name;
     MeshData data;           // the triangle primitives that use `material`, merged
     int material = -1;
+    std::vector<MeshLod> lods;            // coarser levels of detail (filled by AssetLibrary as it loads)
     std::vector<float> weights;           // default morph target weights (data.morphs)
     std::vector<std::string> morphNames;  // the targets' names, when the file gives them
 };

@@ -295,6 +295,31 @@ else()
     target_compile_options(lumora_bc7enc PRIVATE -w $<$<CONFIG:Debug>:-O2>)
 endif()
 
+# meshoptimizer 0.22 (MIT): mesh simplification for levels of detail (borders locked, so the
+# parts of a model stay joined), vertex welding and vertex cache / fetch ordering.
+lumora_fetch_files(meshoptimizer https://raw.githubusercontent.com/zeux/meshoptimizer/v0.22
+    LICENSE.md d1bc307ff896c7fc65e3ff4823cc478194f7a5bc6436f99534ebede4d9e2017a
+    src/meshoptimizer.h 47b02a8a87f5156a1fec891557e6e263e85087f774d80c0fd197c79d41d3b651
+    src/allocator.cpp 73f4397c469353c71f9c8dc78d96418c5045502302f606403c464d6ac45804fe
+    src/indexgenerator.cpp 987b96315e14530be0809f7eda31c9e643b5aafa90619cc5acdc6721bccb2be3
+    src/simplifier.cpp 05c4cc3606e19f9da8bd40a507f8da33c3b63fa86abbdf6307441936af1b3d7c
+    src/vcacheoptimizer.cpp 618429ef4db8ab9b16fde4e73dcf425d89452acbf103085478bc8b1761fa6689
+    src/vfetchoptimizer.cpp bf0c01c1d8e9bc474fda3882c630b440553e9fd221c96d785ba08e7c0f0221ff)
+add_library(lumora_meshoptimizer STATIC
+    ${meshoptimizer_SOURCE_DIR}/src/allocator.cpp
+    ${meshoptimizer_SOURCE_DIR}/src/indexgenerator.cpp
+    ${meshoptimizer_SOURCE_DIR}/src/simplifier.cpp
+    ${meshoptimizer_SOURCE_DIR}/src/vcacheoptimizer.cpp
+    ${meshoptimizer_SOURCE_DIR}/src/vfetchoptimizer.cpp)
+target_include_directories(lumora_meshoptimizer SYSTEM PUBLIC ${meshoptimizer_SOURCE_DIR}/src)
+set_target_properties(lumora_meshoptimizer PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Optimised in Debug builds too (GCC/Clang): models are simplified as they load.
+if(MSVC)
+    target_compile_options(lumora_meshoptimizer PRIVATE /W0)
+else()
+    target_compile_options(lumora_meshoptimizer PRIVATE -w $<$<CONFIG:Debug>:-O2>)
+endif()
+
 # ufbx 0.23.1 (MIT or public domain): FBX and Wavefront OBJ (+ MTL) import. One C file.
 lumora_fetch_files(ufbx https://raw.githubusercontent.com/ufbx/ufbx/v0.23.1
     LICENSE 0dd48ebadf52273c736256325c8f078c03c8bb4facee22a4122de0ad3f615391
