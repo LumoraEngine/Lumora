@@ -126,6 +126,9 @@ struct GpuObject {
     // Material graph (MaterialGraph.hpp): bindless program textures and their instruction counts.
     glm::uvec4 graph{kNoTexture, 0u, kNoTexture, 0u};  // x fragment program, y its length, z vertex program, w its length
     glm::uvec4 graphTextures[2]{glm::uvec4(kNoTexture), glm::uvec4(kNoTexture)};  // the graph's texture slots (bindless)
+    // LOD blending: x the finer level's share of the pixels (0 = no cross-fade), y 1 on the
+    // finer level's copy (it keeps the pixels the coarser one gives up).
+    glm::vec4 lod{0.0f};
 };
 
 struct PushConstants {
@@ -160,7 +163,7 @@ static_assert(sizeof(FrameConstants) ==
                   64 * kMaxLights);
 static_assert(sizeof(GpuProbeVolume) == 64);
 static_assert(sizeof(GpuReflectionProbe) == 64);
-static_assert(sizeof(GpuObject) == 416);
+static_assert(sizeof(GpuObject) == 432);
 static_assert(offsetof(GpuObject, graph) == 368);
 static_assert(offsetof(GpuObject, uvTransformU) == 272);
 static_assert(offsetof(GpuObject, attenuation) == 352);

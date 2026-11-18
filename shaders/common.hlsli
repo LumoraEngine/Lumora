@@ -100,6 +100,7 @@ struct GpuObject {
     uint4 graph;               // material graph: x fragment program (bindless), y its length, z vertex program, w its length
     uint4 graphTextures0;      // the graph's texture slots 0-3 (bindless)
     uint4 graphTextures1;      // ... 4-7
+    float4 lod;                // LOD blending: x the finer level's share of the pixels (0 = none), y 1 on the finer level's copy
 };
 
 /// The material's texture coordinates (KHR_texture_transform).
@@ -123,6 +124,21 @@ static const uint NO_TEXTURE = 0xFFFFFFFFu;
 // register (register(...), DXIL); the C++ binding layouts match both (RenderContext.cpp).
 [[vk::binding(0, 0)]] cbuffer FrameCB DX_REGISTER(b0) { FrameData gFrame; };
 [[vk::binding(1, 0)]] StructuredBuffer<GpuObject> gObjects DX_REGISTER(t1);
+
+/// LOD blending: during a switch both levels are drawn and split the pixels by one dither
+/// pattern, so each pixel shows exactly one of them. True where this draw gives the pixel up.
+/// With TAA (jitter) the pattern changes every frame and the history averages it into a fade.
+/// Callers discard at the end of the pixel shader: discarding earlier would break the
+/// neighbours' derivatives (texture mip selection) in the 2x2 quad.
+bool lodDitheredOut(GpuObject object, float2 pixel) {
+    const float fade = object.lod.x;
+    if (fade <= 0.0) {
+        return false;
+    }
+    const float2 p = floor(pixel) + frac(gFrame.jitter.xy * gFrame.viewportSize.xy * 13.37) * 64.0;
+    const float noise = frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715))));  // interleaved gradient noise
+    return object.lod.y > 0.5 ? noise >= fade : noise < fade;
+}
 // Point lights, binned into screen tiles on the CPU: gLightGrid holds (first, count) per tile,
 // then the light indices those ranges point into.
 [[vk::binding(3, 0)]] StructuredBuffer<GpuLight> gPointLights DX_REGISTER(t3);

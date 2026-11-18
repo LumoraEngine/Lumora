@@ -3,8 +3,14 @@
 // pixel's motion (RG16F, NDC units, jitter removed): where the surface was on screen last frame,
 // from the previous camera and the object's previous transform; temporal anti-aliasing reads it.
 // With LUMORA_MASKED the base colour's alpha cuts holes below the object's cutoff (leaves,
-// fences), as the opaque pass does.
+// fences), as the opaque pass does. The masked and skinned variants also give up the pixels a
+// level of detail hands to the other during LOD blending (lodDitheredOut); objects that blend
+// are drawn with one of them, so the plain variant keeps early depth writes.
 #include "common.hlsli"
+
+#if defined(LUMORA_MASKED) || defined(LUMORA_SKINNED)
+#define LUMORA_LOD_BLEND 1
+#endif
 #include "material_graph.hlsli"
 
 struct VSInput {
@@ -30,6 +36,8 @@ struct VSOutput {
     float2 uv1 : TEXCOORD4;            // for material graphs
     float3 worldPosition : TEXCOORD5;
     float3 normal : TEXCOORD6;
+#elif defined(LUMORA_LOD_BLEND)
+    nointerpolation uint objectIndex : TEXCOORD3;
 #endif
 };
 
@@ -57,6 +65,8 @@ VSOutput VSMain(VSInput input, uint instance : SV_InstanceID) {
     o.uv1 = input.uv1;
     o.worldPosition = world.xyz;
     o.normal = mul((float3x3)object.normalMatrix, input.normal);
+#elif defined(LUMORA_LOD_BLEND)
+    o.objectIndex = objectIndex;
 #endif
     return o;
 }
@@ -80,6 +90,11 @@ float2 PSMain(VSOutput input) : SV_Target0 {
     } else if (object.textures.x != NO_TEXTURE &&
         gTextures[object.textures.x].Sample(gSamplers[gFrame.counts.z], input.uv).a < object.surface.x) {
         discard;
+    }
+#endif
+#if defined(LUMORA_LOD_BLEND)
+    if (lodDitheredOut(gObjects[input.objectIndex], input.position.xy)) {
+        discard;  // the other level of detail draws this pixel (same pattern in the opaque pass)
     }
 #endif
     float2 current = input.current.xy / input.current.w - gFrame.jitter.xy;

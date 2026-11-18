@@ -91,8 +91,10 @@ struct RenderSettings {
     bool linearOutput = false;
     /// Levels of detail: imported meshes switch to simpler versions while the difference stays
     /// under a pixel on screen (under 1 / lodBias pixels). Larger values keep detail longer; 0
-    /// always draws full detail.
+    /// always draws full detail. Near a switch both levels are drawn, splitting the pixels with
+    /// a dither pattern, so the change is a cross-fade rather than a pop (lodBlending).
     float lodBias = 1.0f;
+    bool lodBlending = true;
     /// The frame's intermediate images share textures when they are not needed at the same time
     /// (less video memory). False gives each its own (for comparing, or hunting a bad pass).
     bool shareTransientTextures = true;
@@ -106,6 +108,7 @@ struct SceneDrawStats {
     std::uint32_t transparentObjects = 0;  // see-through objects drawn (blended, back to front)
     std::uint32_t morphedObjects = 0;      // meshes deformed by their blend shapes this frame
     std::uint32_t lodObjects = 0;  // visible objects drawn with a simpler level of detail
+    std::uint32_t lodBlendingObjects = 0;  // of those, ones cross-fading with the finer level (drawn twice)
     std::uint32_t lights = 0;
     std::uint32_t particles = 0;
     bool parallelRecording = false;  // a pass was set up to record on several threads

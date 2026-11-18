@@ -247,6 +247,11 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
     objects.reserve(candidates.size());
     std::vector<glm::mat4> joints;  // skinning palettes of every skinned object, back to back
     bool transmissiveDraws = false;  // see-through surfaces that need the scene behind them
+    struct LodBlend {
+        Draw draw;         // the finer level (its object index is set once it is appended)
+        GpuObject object;  // a copy of the object that keeps the other half of the pixels
+    };
+    std::vector<LodBlend> lodBlends;
     // Objects grouped by mesh (unskinned first), so copies of a mesh sit next to each other.
     std::vector<std::size_t> order(candidates.size());
     for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -302,14 +307,15 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
         // Level of detail: the coarsest whose error stays under a pixel on screen (shadows use
         // the same). Errors are relative to the mesh's largest side: scaled like the object.
         const GpuMesh* drawn = candidates[i].gpuMesh;
+        LodChoice lod;
         if (!drawn->lods.empty() && settings.lodBias > 0.0f) {
             const float largestSide = 2.0f * std::max({p.extent.x, p.extent.y, p.extent.z});
             std::array<float, 8> errors{};
             const std::size_t levels = std::min(drawn->lods.size(), errors.size());
             for (std::size_t l = 0; l < levels; ++l) errors[l] = drawn->lods[l].lodError * largestSide;
             const float pixelsPerUnit = static_cast<float>(extent.height) / (2.0f * std::tan(camera.fovYRadians * 0.5f));
-            const LodChoice lod = selectLod(std::span(errors.data(), levels), glm::length(p.center - camera.position) - glm::length(p.extent),
-                                            pixelsPerUnit, settings.lodBias);
+            lod = selectLod(std::span(errors.data(), levels), glm::length(p.center - camera.position) - glm::length(p.extent),
+                            pixelsPerUnit, settings.lodBias);
             drawn = &drawn->level(lod.level);
             if (lod.level > 0 && p.visible) ++stats.lodObjects;
         }
@@ -413,10 +419,37 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
                 casters.push_back(caster);
             }
         } else {
-            if (p.visible) draws.push_back(draw);
+            // LOD blending (opaque objects in view): the finer level is drawn too, and the two
+            // split the pixels by a dither pattern (lodDitheredOut in the shaders). Shadows keep
+            // the coarser level alone: cached shadow tiles would not follow a screen pattern.
+            const bool blend = p.visible && settings.lodBlending && lod.level > 0 && lod.fade > 0.0f;
+            if (blend) {
+                const bool skinned = candidates[i].gpuMesh->skinned();
+                Draw coarse = draw;
+                // The masked depth prepass can discard; with no cutoff it cuts nothing else.
+                if (!skinned) coarse.variant = static_cast<std::uint8_t>(coarse.variant | kMasked);
+                Draw finer = coarse;
+                finer.mesh = &candidates[i].gpuMesh->level(lod.level - 1);
+                GpuObject finerObject = obj;
+                obj.lod = glm::vec4(lod.fade, 0.0f, 0.0f, 0.0f);
+                finerObject.lod = glm::vec4(lod.fade, 1.0f, 0.0f, 0.0f);
+                draws.push_back(coarse);
+                lodBlends.push_back({finer, finerObject});
+                ++stats.lodBlendingObjects;
+            } else if (p.visible) {
+                draws.push_back(draw);
+            }
             if (anyShadows) casters.push_back(draw);
         }
         objects.push_back(obj);
+    }
+    // The finer levels of blending objects: their own objects, consecutive per mesh, so copies
+    // of one mesh (foliage) still become one instanced draw.
+    std::ranges::stable_sort(lodBlends, std::less<>{}, [](const LodBlend& b) { return b.draw.mesh; });
+    for (LodBlend& b : lodBlends) {
+        b.draw.object = static_cast<std::uint32_t>(objects.size());
+        objects.push_back(b.object);
+        draws.push_back(b.draw);
     }
     // See-through surfaces back to front (by bounds centre), so nearer ones blend over farther.
     std::ranges::stable_sort(transparents, std::greater<>{}, [&](const Draw& d) { return glm::length(d.center - camera.position); });
@@ -465,7 +498,7 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
                         "FrameObjects");
     frame.joints.write(gpu, std::as_bytes(std::span(joints)), DynamicBuffer::Kind::Structured, sizeof(glm::mat4),
                        "FrameJoints");
-    stats.visibleObjects = static_cast<std::uint32_t>(draws.size());
+    stats.visibleObjects = static_cast<std::uint32_t>(draws.size() - lodBlends.size());  // a blending object once
     for (const Draw& d : draws) {
         stats.triangles += d.mesh->indexCount / 3;
     }

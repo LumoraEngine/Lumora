@@ -177,6 +177,72 @@ TEST_F(RendererTest, RendersImportedGltfModel) {
     EXPECT_EQ(renderer_->stats().scene.visibleObjects, 0u);
 }
 
+TEST_F(RendererTest, LodBlendingCrossFadesWithoutHoles) {
+    test::TempDir project;
+    std::filesystem::create_directories(project.path() / "Content" / "Models");
+    test::writeSphereGltf(project.path() / "Content" / "Models" / "ball.gltf");
+    AssetLibrary assets(project.path());
+    auto model = assets.model(project.path() / "Content" / "Models" / "ball.gltf");
+    ASSERT_TRUE(model.has_value()) << model.error().message;
+    auto scene = sceneWithSun();
+    instantiateModel(*scene, **model, "Content/Models/ball.gltf", "Ball");
+    scene->updateWorldTransforms();
+
+    RenderSettings settings;
+    settings.assets = &assets;
+    settings.blockOnAssets = true;
+    constexpr std::uint32_t kSize = 128;
+    auto view = [](float distance) {
+        FlyCameraController cam;
+        cam.setPosition({0.0f, 0.0f, distance});
+        cam.lookAt({0.0f, 0.0f, 0.0f});
+        return cam.view(1.0f);
+    };
+    auto redPixels = [&](const CapturedImage& img) {
+        int count = 0;
+        for (std::uint32_t y = 0; y < img.height; ++y) {
+            for (std::uint32_t x = 0; x < img.width; ++x) {
+                const auto p = pixel(img, x, y);
+                if (p.r > p.g + 30 && p.r > p.b + 30) ++count;
+            }
+        }
+        return count;
+    };
+
+    // Walk away from the ball until the first switch (full detail -> LOD1) cross-fades; take the
+    // middle of that band, where the two levels share the pixels about evenly.
+    std::vector<float> blending;
+    for (float distance = 0.7f; distance < 20.0f; distance *= 1.01f) {
+        ASSERT_TRUE(renderer_->capture(*scene, view(distance), {kSize, kSize}, settings).has_value());
+        const SceneDrawStats& stats = renderer_->stats().scene;
+        if (stats.lodBlendingObjects > 0) {
+            EXPECT_EQ(stats.lodObjects, 1u);
+            EXPECT_EQ(stats.visibleObjects, 1u) << "a blending object counts once";
+            blending.push_back(distance);
+        } else if (!blending.empty()) {
+            break;
+        }
+    }
+    ASSERT_GE(blending.size(), 2u) << "the switch fades over a band of distances";
+    const float middle = blending[blending.size() / 2];
+
+    auto blended = renderer_->capture(*scene, view(middle), {kSize, kSize}, settings);
+    ASSERT_TRUE(blended.has_value());
+    EXPECT_EQ(renderer_->stats().scene.lodBlendingObjects, 1u);
+    settings.lodBlending = false;
+    auto popped = renderer_->capture(*scene, view(middle), {kSize, kSize}, settings);
+    ASSERT_TRUE(popped.has_value());
+    EXPECT_EQ(renderer_->stats().scene.lodBlendingObjects, 0u);
+    EXPECT_EQ(renderer_->stats().scene.lodObjects, 1u);
+
+    // Each pixel shows one of the two levels: the ball stays solid (the dithered halves fit together).
+    const int plain = redPixels(*popped);
+    ASSERT_GT(plain, 200);
+    EXPECT_GE(redPixels(*blended), plain * 97 / 100) << "no holes where both levels gave the pixel up";
+    const auto center = pixel(*blended, kSize / 2, kSize / 2);
+    EXPECT_GT(center.r, center.g + 30);
+}
+
 TEST_F(RendererTest, SamplesMaterialTextures) {
     test::TempDir project;
     std::filesystem::create_directories(project.path() / "Content" / "Models");

@@ -161,6 +161,9 @@ PSOutput PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) {
 float4 PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) : SV_Target0 {
 #endif
     GpuObject object = gObjects[input.objectIndex];
+    // LOD blending: the pixels the other level draws (as in the depth prepass), discarded at the
+    // end so this quad's derivatives stay valid until then.
+    const bool lodHidden = lodDitheredOut(object, input.position.xy);
     const uint uv1Maps = asuint(object.attenuation.w);
     // Each map's UV set: bit 0 base colour, 1 metallic-roughness, 2 emissive, 3 normal, 4 occlusion.
     const float2 baseUv = (uv1Maps & 1u) != 0u ? input.uv1 : input.uv;
@@ -338,6 +341,9 @@ float4 PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) : SV_Target0 {
         // Selection highlight: warm rim plus a faint tint.
         float rim = pow(1.0 - saturate(dot(s.normal, s.view)), 3.0);
         color = lerp(color, color * 0.85 + float3(1.0, 0.55, 0.1) * 0.15, 0.5) + float3(1.0, 0.45, 0.05) * rim * 2.0;
+    }
+    if (lodHidden) {
+        discard;
     }
 #if defined(LUMORA_REFLECTIONS)
     PSOutput o;

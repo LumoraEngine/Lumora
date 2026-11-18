@@ -111,6 +111,48 @@ inline void writeCubeGltf(const std::filesystem::path& file, bool externalBuffer
                                        cube.indices.size() * 2, uvOffset, n * 8, n, n, cube.indices.size(), n);
 }
 
+/// Writes a glTF 2.0 file with one dense red UV sphere (radius 0.5, positions, normals, UVs,
+/// uint32 indices): enough triangles for the importer to build levels of detail.
+inline void writeSphereGltf(const std::filesystem::path& file, std::uint32_t segments = 128, std::uint32_t rings = 64) {
+    const MeshData sphere = makeUvSphere(0.5f, segments, rings);
+    std::vector<unsigned char> bin;
+    auto append = [&](const void* p, std::size_t n) {
+        const auto* b = static_cast<const unsigned char*>(p);
+        bin.insert(bin.end(), b, b + n);
+    };
+    for (const Vertex& v : sphere.vertices) append(&v.position, 12);
+    const std::size_t normalOffset = bin.size();
+    for (const Vertex& v : sphere.vertices) append(&v.normal, 12);
+    const std::size_t uvOffset = bin.size();
+    for (const Vertex& v : sphere.vertices) append(&v.uv, 8);
+    const std::size_t indexOffset = bin.size();
+    append(sphere.indices.data(), sphere.indices.size() * 4);
+    const std::size_t n = sphere.vertices.size();
+    std::ofstream(file) << std::format(R"({{
+  "asset": {{"version": "2.0"}},
+  "scene": 0,
+  "scenes": [{{"nodes": [0]}}],
+  "nodes": [{{"name": "Ball", "mesh": 0}}],
+  "meshes": [{{"name": "SphereMesh", "primitives": [{{"attributes": {{"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 3}}, "indices": 2, "material": 0}}]}}],
+  "materials": [{{"name": "Red", "pbrMetallicRoughness": {{"baseColorFactor": [0.9, 0.1, 0.05, 1], "metallicFactor": 0.0, "roughnessFactor": 0.5}}}}],
+  "buffers": [{{"byteLength": {}, "uri": "data:application/octet-stream;base64,{}"}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": {}}},
+    {{"buffer": 0, "byteOffset": {}, "byteLength": {}}},
+    {{"buffer": 0, "byteOffset": {}, "byteLength": {}}},
+    {{"buffer": 0, "byteOffset": {}, "byteLength": {}}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": {}, "type": "VEC3", "min": [-0.5, -0.5, -0.5], "max": [0.5, 0.5, 0.5]}},
+    {{"bufferView": 1, "componentType": 5126, "count": {}, "type": "VEC3"}},
+    {{"bufferView": 2, "componentType": 5125, "count": {}, "type": "SCALAR"}},
+    {{"bufferView": 3, "componentType": 5126, "count": {}, "type": "VEC2"}}
+  ]
+}})",
+                                       bin.size(), base64(bin), n * 12, normalOffset, n * 12, indexOffset,
+                                       sphere.indices.size() * 4, uvOffset, n * 8, n, n, sphere.indices.size(), n);
+}
+
 /// The cube of writeCubeGltf with another material: `materialJson` is the material object
 /// (glTF JSON), `texturesJson` optional "textures"/"images" entries (with a trailing comma).
 inline void writeCubeGltfWithMaterial(const std::filesystem::path& file, const std::string& materialJson,
