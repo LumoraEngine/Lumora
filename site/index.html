@@ -4,70 +4,125 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Lumora Engine</title>
-  <meta name="description" content="Lumora is a free (GPL-3.0-or-later) C++23 / Vulkan 1.4 3D engine with an integrated editor, live collaboration and a Hub that installs editor versions.">
+  <meta name="description" content="Lumora is a free (GPL-3.0-or-later) C++23 3D engine on Vulkan 1.4 with an integrated editor, visual, Lua and C++ scripting, multiplayer, live collaboration and a Hub that installs editor versions.">
+  <meta name="theme-color" content="#0d0f14" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7fb" media="(prefers-color-scheme: light)">
+  <link rel="canonical" href="https://lumoraengine.xyz/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Lumora Engine">
+  <meta property="og:title" content="Lumora Engine: a free real-time 3D engine on Vulkan 1.4">
+  <meta property="og:description" content="C++23 engine with an integrated editor, physically based rendering, three kinds of hot-reloaded scripts, multiplayer and live collaboration.">
+  <meta property="og:url" content="https://lumoraengine.xyz/">
+  <meta property="og:image" content="https://lumoraengine.xyz/assets/editor.webp">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
+<a class="skip" href="#main">Skip to content</a>
 <header class="site-header">
   <div class="wrap">
     <a class="brand" href="./"><img src="assets/logo.svg" alt="">LUMORA</a>
-    <nav class="nav">
+    <nav class="nav" aria-label="Site">
       <a href="#features">Features</a>
       <a href="#gallery">Gallery</a>
       <a href="#download">Download</a>
-      <a href="docs.html">Documentation</a>
+      <a href="docs.html">Guide</a>
+      <a href="scripting.html">Scripting</a>
       <a href="https://github.com/v3nn7/Lumora">GitHub</a>
     </nav>
   </div>
 </header>
 
-<main>
-  <div class="wrap hero">
-    <span class="eyebrow">Free software · GPL-3.0-or-later</span>
-    <h1>A real-time engine built on <span>Vulkan 1.4</span></h1>
-    <p class="lead">Lumora is a C++23 3D engine with an integrated editor: physically based rendering,
-      rigid-body physics, live collaborative editing over your network or the internet, and a Hub
-      that installs editor versions side by side.</p>
-    <div class="actions">
-      <a class="button primary" href="#download">Download the Hub</a>
-      <a class="button" href="docs.html">Read the documentation</a>
+<main id="main">
+  <div class="hero">
+    <div class="wrap">
+      <span class="eyebrow">Free software · GPL-3.0-or-later</span>
+      <h1>A real-time 3D engine built on <span>Vulkan 1.4</span></h1>
+      <p class="lead">Lumora is a C++23 engine with an integrated editor: modern physically based
+        rendering, physics and animation, scripts in nodes, Lua or C++ that reload while the game
+        runs, multiplayer for your games and live collaborative editing for your team.</p>
+      <div class="actions">
+        <a class="button primary" href="#download">Download the Hub</a>
+        <a class="button" href="docs.html">Read the guide</a>
+      </div>
+      <ul class="facts" aria-label="At a glance">
+        <li><strong>Vulkan 1.4</strong><span>Direct3D 12 back end in progress</span></li>
+        <li><strong>C++23</strong><span>one shared library per module</span></li>
+        <li><strong>173 tests</strong><span>GPU tests check real frames</span></li>
+        <li><strong>Linux &amp; Windows</strong><span>signed, delta-updated releases</span></li>
+      </ul>
+      <img class="shot" src="assets/editor.webp" width="1600" height="960" fetchpriority="high"
+           alt="The Lumora editor: scene hierarchy, a Vulkan viewport showing a grid of PBR spheres with shadows, and the inspector">
     </div>
-    <img class="shot" src="assets/editor.webp" width="1600" height="960"
-         alt="The Lumora editor: scene hierarchy, a Vulkan viewport showing a grid of PBR spheres with shadows, and the inspector">
   </div>
 
   <section id="features">
     <div class="wrap">
       <h2>What is in it</h2>
-      <p class="sub">Everything listed here is implemented and covered by tests - the README separates
-        what works today from the roadmap.</p>
+      <p class="sub">Everything here is implemented today. The
+        <a href="https://github.com/v3nn7/Lumora#what-works-today">README</a> keeps what works apart
+        from the <a href="https://github.com/v3nn7/Lumora/blob/main/docs/ROADMAP.md">roadmap</a>.</p>
+
+      <h3 class="group">Rendering</h3>
       <div class="grid">
-        <div class="card"><div class="icon">✦</div><h3>Modern renderer</h3>
-          <p>Vulkan 1.4 with dynamic rendering, a render graph with automatic barriers and bindless
-            descriptors. HDR PBR with normal maps, cascaded sun shadows with soft filtering, bloom,
-            height fog and ACES tonemapping.</p></div>
-        <div class="card"><div class="icon">⬚</div><h3>Integrated editor</h3>
-          <p>Docking UI around the viewport: hierarchy, reflection-driven inspector, gizmos with
-            snapping, undo/redo for every edit, glTF import, play mode, GPU profiler. WASD fly
-            camera with cursor lock on Wayland.</p></div>
-        <div class="card"><div class="icon">⇄</div><h3>Live collaboration</h3>
+        <article class="card"><div class="icon" aria-hidden="true">✦</div><h3>Modern core</h3>
+          <p>A render graph that culls unused passes and shares transient textures, bindless
+            textures, GPU instancing and multithreaded recording. Forward+ with up to 4096 point
+            and spot lights. Block-compressed textures streamed by their size on screen.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">◐</div><h3>Light and shadow</h3>
+          <p>Virtual shadow maps for the sun, cached spot and point light shadows, image-based
+            lighting from HDR and OpenEXR skies, baked global illumination in light probe volumes,
+            reflection probes, GTAO and screen-space contact shadows.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">◇</div><h3>Image quality</h3>
+          <p>Temporal anti-aliasing with optional upscaling, screen-space reflections, volumetric
+            fog lit by every light, ray-marched clouds, physically based bloom, eye adaptation,
+            motion blur and ACES tonemapping.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">⬡</div><h3>Materials</h3>
+          <p>Everything a glTF material has, including clear coat, sheen and refractive
+            transmission, in shared material assets, plus node-based material graphs (noise,
+            layers, wind for foliage) that run on the GPU and update as you edit.</p></article>
+      </div>
+      <ul class="chips" aria-label="More rendering features">
+        <li>Levels of detail with cross-fade</li><li>See-through surfaces</li><li>Cut-out leaves and fences</li>
+        <li>Decals</li><li>GPU skinning</li><li>Morph targets</li><li>Particles</li>
+        <li>Height fog</li><li>Water with reflections</li><li>Terrain and foliage</li>
+      </ul>
+
+      <h3 class="group">Making games</h3>
+      <div class="grid">
+        <article class="card"><div class="icon" aria-hidden="true">⬚</div><h3>Integrated editor</h3>
+          <p>Docking UI around the viewport: hierarchy, inspector, gizmos with snapping, undo/redo
+            for every edit, content browser, a UI editor for menus and HUDs, console, GPU profiler
+            and play mode.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">{ }</div><h3>Three ways to script</h3>
+          <p>Visual scripts with 100+ nodes, sandboxed Lua 5.4, or C++ for heavy lifting. Mix them
+            in one scene; all three reload on save, even while the game is playing.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">◉</div><h3>Physics and animation</h3>
+          <p>Jolt rigid bodies, triggers, raycasts and a character controller that climbs steps
+            and rides platforms. Skinned animation with state-machine controllers and crossfades.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">▲</div><h3>Worlds</h3>
+          <p>Terrain with grass and rock by slope, water, scattered foliage, decals, particle
+            effects, prefabs and 3D audio with mixer buses, all placed and previewed in the
+            editor.</p></article>
+      </div>
+
+      <h3 class="group">Together and shipped</h3>
+      <div class="grid">
+        <article class="card"><div class="icon" aria-hidden="true">⇄</div><h3>Live collaboration</h3>
           <p>Edit one scene together on your LAN or through a playit.gg tunnel. Edits merge per
-            field and you see each other's cameras. Imported models travel to whoever lacks them.
-            Everything is TLS-encrypted.</p></div>
-        <div class="card"><div class="icon">◉</div><h3>Physics</h3>
-          <p>Jolt Physics rigid bodies - static, kinematic and dynamic - with box, sphere and capsule
-            colliders, stepped at a fixed rate on Jolt's worker threads. Press Play in the editor.</p></div>
-        <div class="card"><div class="icon">⬇</div><h3>Hub and updates</h3>
-          <p>The Hub installs editor versions side by side, opens each project in its version and
-            offers stable, beta and alpha channels. Releases are signed, and updates download only
-            the modules that changed.</p></div>
-        <div class="card"><div class="icon">{ }</div><h3>C++ scripts, hot-reloaded</h3>
-          <p>Write behaviours in C++ in your project. The editor compiles them and reloads the
-            game library every time you save, even while the game is playing.</p></div>
-        <div class="card"><div class="icon">⚙</div><h3>Built to be tested</h3>
-          <p>More than 170 automated tests, including GPU tests that render real frames and check
-            pixels, Vulkan validation in CI, and UI tests that drive the editor and the Hub.</p></div>
+            field, you see each other's cameras and selections, and missing models travel to
+            whoever lacks them.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">⌘</div><h3>Multiplayer games</h3>
+          <p>Players host or join over encrypted UDP. Entities with a Network Identity are shared
+            and smoothed, and RPCs and shared values work from C++, Lua and visual scripts.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">⇲</div><h3>Import and export</h3>
+          <p>glTF, FBX and OBJ models with skins, morph targets and animations; PNG, JPEG, WebP and
+            KTX2 textures. <em>Export Game</em> writes a standalone folder with cooked assets.</p></article>
+        <article class="card"><div class="icon" aria-hidden="true">⬇</div><h3>Hub and updates</h3>
+          <p>The Hub installs editor versions side by side and opens each project in its own.
+            Releases are signed, come on stable, beta and alpha channels, and updates download
+            only the modules that changed.</p></article>
       </div>
     </div>
   </section>
@@ -75,17 +130,17 @@
   <section id="gallery">
     <div class="wrap">
       <h2>Rendered by Lumora</h2>
-      <p class="sub">Straight from the engine's headless renderer (<code>lumora-editor --headless --render</code>),
-        using the project templates.</p>
+      <p class="sub">Straight from the engine's headless renderer
+        (<code>lumora-editor --headless --render</code>), using the project templates.</p>
       <div class="gallery">
-        <figure><img src="assets/render-materials.webp" width="1600" height="900" loading="lazy"
-                     alt="Two rows of spheres sweeping metallic and roughness values">
+        <figure><a href="assets/render-materials.webp"><img src="assets/render-materials.webp" width="1600" height="900" loading="lazy"
+                     alt="Two rows of spheres sweeping metallic and roughness values"></a>
           <figcaption>Material showcase: metallic and roughness sweeps</figcaption></figure>
-        <figure><img src="assets/render-physics.webp" width="1600" height="900" loading="lazy"
-                     alt="The physics playground: a tower of crates, balls and a paddle casting shadows on a grid floor">
-          <figcaption>Physics playground: cascaded shadows</figcaption></figure>
-        <figure><img src="assets/render-basic.webp" width="1600" height="900" loading="lazy"
-                     alt="A basic scene with a few primitive shapes under a sun">
+        <figure><a href="assets/render-physics.webp"><img src="assets/render-physics.webp" width="1600" height="900" loading="lazy"
+                     alt="The physics playground: a tower of crates, balls and a paddle casting shadows on a grid floor"></a>
+          <figcaption>Physics playground: soft sun shadows</figcaption></figure>
+        <figure><a href="assets/render-basic.webp"><img src="assets/render-basic.webp" width="1600" height="900" loading="lazy"
+                     alt="A basic scene with a few primitive shapes under a sun"></a>
           <figcaption>The basic template</figcaption></figure>
       </div>
     </div>
@@ -94,8 +149,9 @@
   <section id="download">
     <div class="wrap">
       <h2>Download</h2>
-      <p class="sub">Install the Hub; it downloads and updates editor versions for you. Linux
-        builds are tested on every release; Windows support is new, so please report problems.</p>
+      <p class="sub">Install the Hub; it downloads and updates editor versions for you. In its
+        <em>Editors</em> page you choose the channel: <strong>stable</strong>,
+        <strong>beta</strong> or <strong>alpha</strong> for the newest features.</p>
       <div class="download">
         <div class="card">
           <h3>Lumora Hub for Linux</h3>
@@ -115,12 +171,15 @@
         </div>
         <div class="card">
           <h3>Build from source</h3>
-          <p class="note">CMake + Ninja, GCC 14 or Clang 18, Qt 6.5+, Vulkan SDK 1.4.</p>
+          <p class="note">CMake 3.28+ and Ninja, GCC 14 or Clang 18 (MSVC on Windows), Qt 6.5+,
+            Vulkan SDK 1.4.</p>
           <pre><code>cmake --preset release
 cmake --build --preset release</code></pre>
           <a class="button" href="docs.html#build-from-source">Build instructions</a>
         </div>
       </div>
+      <p class="note help">Something not working? <a href="https://github.com/v3nn7/Lumora/issues">Open an issue</a>
+        with your GPU, driver and the output of <code>lumora-editor --headless --info</code>.</p>
     </div>
   </section>
 </main>
@@ -128,7 +187,8 @@ cmake --build --preset release</code></pre>
 <footer class="site-footer">
   <div class="wrap">
     <span>Lumora Engine · free software under the <a href="https://github.com/v3nn7/Lumora/blob/main/LICENSE">GNU GPL v3 or later</a></span>
-    <span><a href="docs.html">Documentation</a> · <a href="https://github.com/v3nn7/Lumora">Source</a> ·
+    <span><a href="docs.html">Guide</a> · <a href="scripting.html">Scripting</a> ·
+      <a href="https://github.com/v3nn7/Lumora">Source</a> ·
       <a href="https://github.com/v3nn7/Lumora/blob/main/CONTRIBUTING.md">Contributing</a></span>
   </div>
 </footer>

@@ -1,10 +1,10 @@
 name: Website
 
-# Builds site/ plus the user guide (docs/GUIDE.md) and publishes them to GitHub Pages.
+# Builds site/ plus the guides (docs/GUIDE.md, docs/SCRIPTING.md) and publishes them to GitHub Pages.
 on:
   push:
     branches: [main]
-    paths: ["site/**", "docs/GUIDE.md", "scripts/site/**", ".github/workflows/pages.yml"]
+    paths: ["site/**", "docs/GUIDE.md", "docs/SCRIPTING.md", "scripts/site/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
