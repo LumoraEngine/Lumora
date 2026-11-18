@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <span>
 #include <sstream>
 
 using namespace lumora;

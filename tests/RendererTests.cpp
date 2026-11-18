@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <memory>
 #include <optional>
+#include <span>
+#include <vector>
 
 using namespace lumora;
 using namespace lumora::render;
