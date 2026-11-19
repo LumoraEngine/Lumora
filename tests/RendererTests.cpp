@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -212,9 +213,13 @@ TEST_F(RendererTest, LodBlendingCrossFadesWithoutHoles) {
     };
 
     // Walk away from the ball until the first switch (full detail -> LOD1) cross-fades; take the
-    // middle of that band, where the two levels share the pixels about evenly.
+    // middle of that band, where the two levels share the pixels about evenly. Levels are chosen
+    // by the distance from the bounds (half-diagonal sqrt(3) / 2), where the band spans a factor
+    // of 1 / 0.7: small steps there always land several captures in it.
+    const float boundsRadius = std::sqrt(3.0f) * 0.5f;
     std::vector<float> blending;
-    for (float distance = 0.7f; distance < 20.0f; distance *= 1.01f) {
+    for (float beyond = 0.01f; beyond < 40.0f; beyond *= 1.03f) {
+        const float distance = boundsRadius + beyond;
         ASSERT_TRUE(renderer_->capture(*scene, view(distance), {kSize, kSize}, settings).has_value());
         const SceneDrawStats& stats = renderer_->stats().scene;
         if (stats.lodBlendingObjects > 0) {
@@ -225,7 +230,7 @@ TEST_F(RendererTest, LodBlendingCrossFadesWithoutHoles) {
             break;
         }
     }
-    ASSERT_GE(blending.size(), 2u) << "the switch fades over a band of distances";
+    ASSERT_GE(blending.size(), 3u) << "the switch fades over a band of distances";
     const float middle = blending[blending.size() / 2];
 
     auto blended = renderer_->capture(*scene, view(middle), {kSize, kSize}, settings);

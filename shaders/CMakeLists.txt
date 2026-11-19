@@ -28,6 +28,8 @@ lumora_add_shader(LUMORA_SHADER_FILES SOURCE depth_skinned.hlsl  STAGE vert ENTR
 lumora_add_shader(LUMORA_SHADER_FILES SOURCE shadow_skinned.hlsl STAGE vert ENTRY VSMain OUTPUT shadow.skinned.vert.spv)
 lumora_add_shader(LUMORA_SHADER_FILES SOURCE depth_masked.hlsl   STAGE vert ENTRY VSMain OUTPUT depth.masked.vert.spv)
 lumora_add_shader(LUMORA_SHADER_FILES SOURCE depth_masked.hlsl   STAGE frag ENTRY PSMain OUTPUT depth.masked.frag.spv)
+lumora_add_shader(LUMORA_SHADER_FILES SOURCE depth_dithered.hlsl STAGE vert ENTRY VSMain OUTPUT depth.dithered.vert.spv)
+lumora_add_shader(LUMORA_SHADER_FILES SOURCE depth_dithered.hlsl STAGE frag ENTRY PSMain OUTPUT depth.dithered.frag.spv)
 lumora_add_shader(LUMORA_SHADER_FILES SOURCE shadow_masked.hlsl  STAGE vert ENTRY VSMain OUTPUT shadow.masked.vert.spv)
 lumora_add_shader(LUMORA_SHADER_FILES SOURCE shadow_masked.hlsl  STAGE frag ENTRY PSMain OUTPUT shadow.masked.frag.spv)
 lumora_add_shader(LUMORA_SHADER_FILES SOURCE ssao.hlsl     STAGE vert ENTRY VSMain OUTPUT ssao.vert.spv)

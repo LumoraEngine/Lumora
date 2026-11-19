@@ -61,13 +61,11 @@ void SceneRenderer::addDepthPasses(SceneFrame& f) {
     const RGImage localAtlas = f.localAtlas;
     const VsmFrame& vsmFrame = f.vsmFrame;
     auto prepassPipeline = [this](const Draw& d) -> nvrhi::IGraphicsPipeline* {
-        if (d.mesh->skinned()) return depthPrepassSkinned_;
-        switch (d.variant) {
-            case kMasked: return depthPrepassMasked_;
-            case kTwoSided: return depthPrepassTwoSided_;
-            case kMasked | kTwoSided: return depthPrepassMaskedTwoSided_;
-            default: return depthPrepass_;
-        }
+        if (d.mesh->skinned()) return depthPrepassSkinned_;  // (dithers when the object blends levels)
+        const bool twoSided = (d.variant & kTwoSided) != 0;
+        if ((d.variant & kMasked) != 0) return twoSided ? depthPrepassMaskedTwoSided_ : depthPrepassMasked_;  // (dithers too)
+        if ((d.variant & kDithered) != 0) return twoSided ? depthPrepassDitheredTwoSided_ : depthPrepassDithered_;
+        return twoSided ? depthPrepassTwoSided_ : depthPrepass_;
     };
 
     // ---- Depth prepass, then ambient occlusion from it ---------------------------------------

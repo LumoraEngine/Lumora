@@ -3,12 +3,13 @@
 // pixel's motion (RG16F, NDC units, jitter removed): where the surface was on screen last frame,
 // from the previous camera and the object's previous transform; temporal anti-aliasing reads it.
 // With LUMORA_MASKED the base colour's alpha cuts holes below the object's cutoff (leaves,
-// fences), as the opaque pass does. The masked and skinned variants also give up the pixels a
-// level of detail hands to the other during LOD blending (lodDitheredOut); objects that blend
-// are drawn with one of them, so the plain variant keeps early depth writes.
+// fences), as the opaque pass does. The masked, skinned and dithered (depth_dithered.hlsl)
+// variants also give up the pixels a level of detail hands to the other during LOD blending
+// (lodDitheredOut); objects that blend are drawn with one of them, so the plain variant keeps
+// early depth writes.
 #include "common.hlsli"
 
-#if defined(LUMORA_MASKED) || defined(LUMORA_SKINNED)
+#if defined(LUMORA_MASKED) || defined(LUMORA_SKINNED) || defined(LUMORA_DITHERED)
 #define LUMORA_LOD_BLEND 1
 #endif
 #include "material_graph.hlsli"

@@ -41,10 +41,11 @@ struct SceneDraw {
     std::uint32_t count = 1;  // instances: objects object .. object + count - 1
     std::uint64_t key = 0;    // the entity (virtual shadow map caster tracking)
     std::uint64_t state = 0;  // changes when its shadow can change
-    std::uint8_t variant = 0; // kMasked | kTwoSided (unskinned meshes)
+    std::uint8_t variant = 0; // kMasked | kTwoSided | kDithered (unskinned meshes)
 };
 inline constexpr std::uint8_t kMasked = 1;
 inline constexpr std::uint8_t kTwoSided = 2;
+inline constexpr std::uint8_t kDithered = 4;  // LOD blending: the depth prepass discards the other level's pixels
 
 /// Copies of one mesh in consecutive objects become one instanced draw.
 inline std::vector<SceneDraw> instanced(const std::vector<SceneDraw>& list) {

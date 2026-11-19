@@ -274,6 +274,14 @@ SceneRenderer::SceneRenderer(RenderContext& context) : ctx_(context) {
     prepass.name = "DepthPrepassMasked";
     prepass.cull = nvrhi::RasterCullMode::Back;
     depthPrepassMasked_ = make(prepass);
+    prepass.name = "DepthPrepassDithered";
+    prepass.vertexShader = "depth.dithered.vert";
+    prepass.pixelShader = "depth.dithered.frag";
+    prepass.input = VertexInput::MeshPosition;
+    depthPrepassDithered_ = make(prepass);
+    prepass.name = "DepthPrepassDitheredTwoSided";
+    prepass.cull = nvrhi::RasterCullMode::None;
+    depthPrepassDitheredTwoSided_ = make(prepass);
 
     for (int blur = 0; blur < 2; ++blur) {
         PipelineDesc ao;

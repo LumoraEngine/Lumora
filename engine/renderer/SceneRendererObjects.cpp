@@ -426,8 +426,8 @@ void SceneRenderer::gatherObjects(SceneFrame& f) {
             if (blend) {
                 const bool skinned = candidates[i].gpuMesh->skinned();
                 Draw coarse = draw;
-                // The masked depth prepass can discard; with no cutoff it cuts nothing else.
-                if (!skinned) coarse.variant = static_cast<std::uint8_t>(coarse.variant | kMasked);
+                // A depth prepass that can discard (skinned and masked ones always can).
+                if (!skinned) coarse.variant = static_cast<std::uint8_t>(coarse.variant | kDithered);
                 Draw finer = coarse;
                 finer.mesh = &candidates[i].gpuMesh->level(lod.level - 1);
                 GpuObject finerObject = obj;

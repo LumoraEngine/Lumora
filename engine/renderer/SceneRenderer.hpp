@@ -297,6 +297,8 @@ private:
     nvrhi::GraphicsPipelineHandle depthPrepassTwoSided_;
     nvrhi::GraphicsPipelineHandle depthPrepassMasked_;
     nvrhi::GraphicsPipelineHandle depthPrepassMaskedTwoSided_;
+    nvrhi::GraphicsPipelineHandle depthPrepassDithered_;  // LOD blending: gives up the other level's pixels
+    nvrhi::GraphicsPipelineHandle depthPrepassDitheredTwoSided_;
     nvrhi::GraphicsPipelineHandle ssao_;
     nvrhi::GraphicsPipelineHandle ssaoBlur_;
     nvrhi::GraphicsPipelineHandle bloomDown_;
