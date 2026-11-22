@@ -49,6 +49,12 @@ where the current design leaves room for them.
 | Errors | `std::expected` (`lumora::Result`) for recoverable failures (I/O, parsing). Exceptions for unrecoverable initialisation failures (`rhi::UnsupportedHardwareError`, `rhi::VulkanError`) and device loss (`rhi::DeviceLostError`), which the viewport turns into a visible message |
 | Ownership | RAII everywhere: NVRHI handles (`nvrhi::BufferHandle`, `TextureHandle`, ...) for GPU resources and `rhi::DeviceHandle<T, vkDestroyT>` for the few raw Vulkan handles left (semaphores). No raw `new`/`delete` in engine code |
 
+## Core foundation (`lumora_core`)
+
+- **Memory allocators** (`engine/core/MemoryAllocators.hpp`, `MemoryAllocators.cpp`): `LinearAllocator` (64 MiB default bump allocator with `FrameScope` RAII rewind), O(1) intrusive free-list `PoolAllocator` / `TypedPool<T>`, and O(1) Two-Level Segregated Fit `TlsfAllocator` with power-of-two alignment splitting and boundary-tag coalescing.
+- **SoA archetype ECS** (`engine/core/ArchetypeStore.hpp`, `ArchetypeStore.cpp`): 64-byte cache-line aligned `AlignedSoaColumn<T>` storage, `KinematicSoaTable`, `ArchetypeRegistry`, and SIMD-friendly `BatchKernels` (`integrateKinematics`, `computeWorldAabbs`, `batchScaleTranslate`).
+- **Lock-free queues & fiber jobs** (`engine/core/LockFreeQueue.hpp`, `engine/core/FiberJobSystem.hpp`, `FiberJobSystem.cpp`): wait-free `SpscRingBuffer`, Vyukov bounded `MpmcBoundedQueue`, atomic `JobCounter`, and Naughty Dog-style cooperative `FiberJobSystem` (core-pinned workers, pooled Win32 fibers / POSIX `ucontext`, non-blocking `waitForCounter`, `parallelFor`).
+
 ## Renderer
 
 ### Layers
@@ -167,6 +173,24 @@ storage format with glslang's `[[spv::format_rgba16f]]` style attribute.
 Not yet implemented: sharing memory between images of different formats (placed resources) and
 async-compute scheduling.
 
+### AAA GPU passes (`SceneRenderer` opt-in)
+
+`RenderSettings` exposes three opt-in compute pipelines wired into `SceneRenderer`
+(`SceneRenderer.cpp`, `SceneRendererSurfaces.cpp`) without altering default rendering when disabled:
+
+- **Two-phase Hi-Z GPU occlusion culling** (`engine/renderer/GpuCulling.hpp`, `GpuCulling.cpp`,
+  `shaders/hiz_build.hlsl`, `shaders/gpu_cull.hlsl`): `GpuOcclusionCuller` builds a reversed-Z
+  min-depth Hi-Z pyramid (`CSMain`) and compacts indirect draws in two phases (`CSPhase1` using
+  the previous frame's Hi-Z, `CSPhase2` re-testing disoccluded instances against current-frame Hi-Z).
+- **SDF ray-traced global illumination** (`engine/renderer/SdfGi.hpp`, `SdfGi.cpp`,
+  `shaders/rtgi_sdf.hlsl`): `SdfGiPass` voxelizes proxy AABBs into 3D `R16_FLOAT` distance and
+  `RGBA16_FLOAT` surfel caches (`buildSdfVolumeFromScene`, `injectDirectLightingToSurfels`,
+  `propagateSdfMultiBounce`) and dispatches sphere-traced diffuse GI (`CSMain`).
+- **ReSTIR DI** (`engine/renderer/RestirLighting.hpp`, `RestirLighting.cpp`,
+  `shaders/restir_di.hlsl`): `RestirPass` runs spatio-temporal reservoir resampling over 16-byte
+  `GpuReservoir` ping-pong `RGBA32_UINT` targets (`CSInitialTemporal` + `CSSpatialResolve` with
+  depth/normal edge-stopping and `maxTemporalM` clamping).
+
 ### Uploads
 
 `UploadQueue` records each copy into its own command buffer and signals a timeline semaphore.
@@ -222,6 +246,10 @@ Command recording is already spread over the job system for large passes (`recor
   That one description drives JSON serialization, the inspector UI and the "Add Component" menu.
   Adding a reflected component therefore requires no serializer or editor changes. Unknown
   components and fields are skipped with a warning (forward compatibility).
+- **Open-world spatial streaming** (`engine/scene/WorldStreaming.hpp`, `WorldStreaming.cpp`):
+  `WorldStreamer` manages 2D XZ grid sectors (`SectorCoord`, binary `.lsector` packages with LZ
+  block compression and checksum verification), async disk loading, three-tier HLOD hysteresis
+  (`HlodLevel`, `evaluateSectorHlod`), and time-sliced scene commits (`commitBudgetMs`).
 
 ## Assets
 
@@ -232,6 +260,13 @@ Command recording is already spread over the job system for large passes (`recor
 - `AssetLibrary` (per project) resolves portable keys, `<file>#<mesh>`, `<file>#tex<image>` and
   plain image paths. Keys must be relative and stay inside the project. It caches models,
   decoded textures and failures, so a broken reference is reported once.
+- **Meshlets & offline asset cooking** (`engine/assets/Meshlets.hpp`, `Meshlets.cpp`,
+  `engine/assets/MeshCooker.hpp`, `MeshCooker.cpp`, `engine/assets/AssetDatabase.hpp`,
+  `AssetDatabase.cpp`): `buildMeshlets` clusters meshes via meshoptimizer into hardware-sized
+  64-vertex / 124-triangle `Meshlet` batches with bounding spheres and normal cones
+  (`cullMeshletCone`, `cullMeshletFrustum`). `cookMesh` emits checksummed binary `.lmesh` files
+  (`writeCookedMesh` / `readCookedMesh`) with LODs and meshlets, while `AssetDatabase` tracks
+  FNV-1a content hashes for incremental cooking (`cookStaleMeshes`).
 - The renderer's `MeshCache` and `TextureCache` upload on first use (non-blocking timeline
   uploads; textures get a full blit-generated mip chain, sRGB views for colour maps) and key
   GPU data by absolute path, so projects never collide.
@@ -244,6 +279,27 @@ Command recording is already spread over the job system for large passes (`recor
 number of steps per frame to avoid a spiral of death. Given the same number of steps the result
 is deterministic (tested). Editor play mode clones the edited scene through the serializer,
 simulates the copy and discards it on Stop, so play-mode changes never reach the saved scene.
+`Simulation` also drives `RvoCrowd`, optional `WorldStreamer` commits, and links `PhysicsWorld`
+with `AudioWorld` for ray-traced acoustics.
+
+### Physics, character simulation, crowd & spatial acoustics
+
+- **Pro vehicle dynamics** (`runtime/VehicleDynamics.hpp`, `VehicleDynamics.cpp`): Pacejka Magic
+  Formula tire forces, combined-slip friction ellipse, asymmetric suspension + anti-roll bars,
+  gearbox/powertrain, and limited-slip differential (`VehicleDrivetrainSim`), bridged to Jolt
+  vehicles via `PhysicsWorld::vehicleDrivetrain` / `vehicleTelemetry`.
+- **Procedural IK & active ragdoll** (`runtime/ProceduralIk.hpp`, `ProceduralIk.cpp`,
+  `runtime/ActiveRagdoll.hpp`, `ActiveRagdoll.cpp`): analytic two-bone IK (`solveTwoBoneIk`),
+  cone-constrained `solveFabrik`, ground foot placement, and look-at solving; quaternion PID joint
+  motors, `DualSkeletonState` tracking, capture-point balance, and fall bracing driven through
+  `PhysicsWorld::driveActiveRagdoll`.
+- **Crowd collision avoidance** (`runtime/RvoCrowd.hpp`, `RvoCrowd.cpp`): 2D XZ-plane RVO2 /
+  ORCA solver (`RvoCrowd`) with spatial hashing for multi-agent and static-obstacle avoidance.
+- **Spatial acoustics** (`runtime/SpatialAcoustics.hpp`, `SpatialAcoustics.cpp`, `runtime/AudioWorld.cpp`):
+  `SpatialAcousticsSolver` computes raycast occlusion/transmission (`AcousticMaterial`), Doppler
+  pitch shift, and reverb zone blending, streaming parameters lock-free over `SpscRingBuffer` to
+  realtime zero-allocation `BiquadLowPassFilter` and `SchroederReverbDsp` nodes in `AudioWorld`
+  (opt-in via `AudioWorld::setAcousticsEnabled`).
 
 ### Network games
 
@@ -271,6 +327,13 @@ sender has its own playback clock, 0.1 s behind its latest state and nudged towa
 an entity's owner is elsewhere, its dynamic body is made kinematic (`PhysicsWorld::refreshBody`)
 and restored when ownership returns or the game ends. RPCs and value changes from clients go
 through the host, which checks that the sender owns the entity.
+
+For competitive / fast-paced multiplayer, `NetSession` exposes `prediction()`
+(`runtime/net/ClientPrediction.hpp`, `ClientPrediction.cpp`: `PredictionController` fixed-tick input
+ring buffer, server reconciliation, replay smoothing, and delta-compressed snapshots) and
+`lagCompensation()` (`runtime/net/LagCompensation.hpp`, `LagCompensation.cpp`: `LagCompHistory`
+timestamped entity pose & `HitCapsule` ring buffers with bounded rewind raycasting, sampled each
+step in `NetSession::endStep`).
 
 ## Application layer
 
@@ -428,6 +491,7 @@ colour.
 | UI (offscreen QPA) | Hub → Editor → Hub, hierarchy editing, reparent + save round trip, play-mode isolation, reflection-built inspector, two editors sharing a live session |
 | Scene patches | Every kind of edit round-trips, partial records, reorders, concurrent field merges, deletion wins, malformed input |
 | Collaboration (loopback sockets) | Framing under arbitrary splits, hostile frames, path confinement, address parsing, joining, convergence under concurrent edits, drift repair from the digest, presence over UDP, chat, asset download and guest upload, path traversal, wrong password and old protocol versions, host shutdown |
+| AAA core, rendering & runtime (`MemoryAllocators`, `ArchetypeStore`, `FiberJobSystem`, `GpuCulling`, `Meshlets`, `SdfGi`, `RestirLighting`, `VehicleDynamics`, `ProceduralIk`, `ActiveRagdoll`, `RvoCrowd`, `WorldStreaming`, `SpatialAcoustics`, `AssetCooker`, `NetPrediction`, `NetLagComp`) | Linear/Pool/TLSF allocators, 64B SoA batch kernels, single/multi-worker fiber yield, Vulkan 1.4 GPU Hi-Z culling + SDF GI + ReSTIR DI dispatch, meshlet cone culling, Pacejka/LSD drivetrain, two-bone/FABRIK IK, PID active ragdoll balance, ORCA crowd crossing, async `.lsector` streaming, `.lmesh` / `AssetDatabase` incremental cooking, occlusion/Doppler/reverb DSP, and client prediction + rewind lag compensation |
 
 Useful environment variables: `LUMORA_TEST_VALIDATION=1` (validation in GPU tests), `LUMORA_GPU=n`,
 `LUMORA_SHADER_DIR`, and `LUMORA_UI_SNAPSHOT=/path/prefix`, which writes PNGs of all windows

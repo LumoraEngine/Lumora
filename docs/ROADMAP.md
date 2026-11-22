@@ -258,9 +258,11 @@ Jest: `runtime/GameUi` (przycisk, pole wyboru, suwak, panel, etykieta, nawigacja
   Player: `--host-game [port]`, `--join-game <adres>`; host bez okna: `--headless --simulate
   <s> --host-game`. Testy: transport (utrata 30%, złe hasło, fałszywe pakiety, rozłączenie) i dwie
   symulacje przez loopback (ruch hosta u klienta, spawn i własność, RPC, wartości, zmiana sceny).
-  Brakuje: przewidywania po stronie klienta, kompresji delta stanów, replikacji innych pól
+  Brakuje: replikacji innych pól
   komponentów niż Transform (zostają wartości współdzielone), interfejsu w edytorze (gra w edytorze
-  jako host lub klient).
+  jako host lub klient). Przewidywanie po stronie klienta (`ClientPrediction.{hpp,cpp}`), kompresja
+  delta stanów i kompensacja opóźnień z cofaniem kapsuł (`LagCompensation.{hpp,cpp}`) zostały
+  zrealizowane i podpięte pod `NetSession`.
 - **Jak:** moduł `lumora_net` w `runtime/` bez Qt: UDP z kanałami niezawodnym i zawodnym,
   klient-serwer (host w grze), replikacja komponentów (Transform, fizyka, własne pola skryptów)
   z interpolacją, RPC ze skryptów (Lua, węzły, C++). Szyfrowanie: monocypher (już w projekcie),
@@ -279,10 +281,16 @@ Jest: `runtime/GameUi` (przycisk, pole wyboru, suwak, panel, etykieta, nawigacja
 ### 3.4 Animacja (L)
 Drzewa mieszania 1D/2D, warstwy i maski kości, IK (dwie kości, patrzenie), root motion.
 Gdzie: `runtime/AnimationSystem`, `AnimatorStateMachine` (format `.lanim`).
+- **Stan IK i aktywny ragdoll: zrobione.** Solver IK (`runtime/ProceduralIk.{hpp,cpp}`: 2-kościowy,
+  FABRIK z ograniczeniami kątowymi, stawianie stóp, look-at) oraz aktywny ragdoll z regulatorami PID
+  i kontrolą równowagi (`runtime/ActiveRagdoll.{hpp,cpp}`, spięty z `PhysicsWorld::driveActiveRagdoll`).
 
 ### 3.5 Audio (M)
 Strefy pogłosu (węzły miniaudio), tłumienie przez przeszkody (raycast fizyki, filtr dolnoprzepustowy),
 efekt Dopplera, strumieniowanie muzyki. Gdzie: `runtime/AudioWorld.cpp`.
+- **Stan akustyki przestrzennej: zrobione.** `runtime/SpatialAcoustics.{hpp,cpp}` (okluzja przez
+  raycast `PhysicsWorld`, efekt Dopplera, strefy pogłosu, filtry `BiquadLowPassFilter` i
+  `SchroederReverbDsp` zasilane lock-free przez `SpscRingBuffer` w `AudioWorld`).
 
 ### 3.6 Edytor terenu i roślinności (L)
 Rzeźbienie, wygładzanie, malowanie warstw (splat), malowanie roślinności pędzlem.
@@ -321,12 +329,51 @@ Platforma w `GameExporter` i oknie eksportu, Build Support „Web” w Hubie, za
 
 - **Wydajność:** wątek renderowania z migawką sceny (zrobione), culling przebiegów i wspólne
   tekstury obrazów tymczasowych w render graphie, jedna pula dla klatek w locie (zrobione),
-  profiler Tracy, culling na GPU, meshlety, budżety klatki.
+  profiler Tracy, culling na GPU (zrobione: `GpuCulling`), meshlety (zrobione: `Meshlets`),
+  budżety klatki.
 - **Edytor:** wyszukiwanie zasobów, podgląd materiałów, prefaby zagnieżdżone, wieloscenowość.
 - **Stabilność:** testy wizualne (porównanie obrazów z wzorcami), testy na obu platformach przy
   każdym PR, zrzuty awarii.
 - **Dokumentacja:** `docs/GUIDE.md` i `docs/SCRIPTING.md` aktualizowane z każdą funkcją;
   przewodnik migracji przy zmianach ABI skryptów (`LUMORA_SCRIPT_ABI`).
+
+---
+
+## Rozbudowa AAA: 7 zrealizowanych podsystemów
+
+1. **Rdzeń i wielowątkowość (`lumora_core`) — zrobione:**
+   - Alokatory `LinearAllocator` / `FrameScope`, `PoolAllocator` / `TypedPool<T>`, `TlsfAllocator`
+     (`engine/core/MemoryAllocators.{hpp,cpp}`).
+   - Sklep ECS w układzie SoA wyrównanym do 64 B z jądrami wsadowymi `BatchKernels`
+     (`engine/core/ArchetypeStore.{hpp,cpp}`).
+   - Kolejki bezblokadowe `SpscRingBuffer` / `MpmcBoundedQueue` i system zadań na włóknach
+     `FiberJobSystem` z `JobCounter` (`engine/core/LockFreeQueue.hpp`, `FiberJobSystem.{hpp,cpp}`).
+2. **Potok renderowania AAA (`lumora_renderer`, `lumora_assets`, `shaders/`) — zrobione (opt-in w `RenderSettings`):**
+   - Dwufazowy culling okluzyjny Hi-Z na GPU i rysowanie pośrednie (`engine/renderer/GpuCulling.{hpp,cpp}`,
+     `shaders/hiz_build.hlsl`, `shaders/gpu_cull.hlsl`).
+   - Podział siatek na meshlety 64v/124t i culling stożków normalnych (`engine/assets/Meshlets.{hpp,cpp}`).
+   - Globalne oświetlenie ray-traced na polach odległości SDF i cache surfli
+     (`engine/renderer/SdfGi.{hpp,cpp}`, `shaders/rtgi_sdf.hlsl`).
+   - ReSTIR DI z czasowo-przestrzennym próbkowaniem rezerwuarów (`engine/renderer/RestirLighting.{hpp,cpp}`,
+     `shaders/restir_di.hlsl`).
+3. **Fizyka pojazdów, animacja proceduralna i tłum (`lumora_runtime`) — zrobione:**
+   - Dynamika pojazdów Pacejka, elipsa tarcia, zawieszenie, skrzynia biegów i LSD
+     (`runtime/VehicleDynamics.{hpp,cpp}`, spięte z `PhysicsWorld`).
+   - Proceduralne IK (`runtime/ProceduralIk.{hpp,cpp}`) i aktywny ragdoll PID/równowagi
+     (`runtime/ActiveRagdoll.{hpp,cpp}`, spięte z `PhysicsWorld`).
+   - Unikanie kolizji tłumu RVO2 / ORCA (`runtime/RvoCrowd.{hpp,cpp}`, spięte z `Simulation`).
+4. **Strumieniowanie otwartego świata (`lumora_scene`) — zrobione:**
+   - Siatka sektorów `.lsector` z kompresją LZ, ładowaniem asynchronicznym i 3-poziomowym HLOD z histerezą
+     (`engine/scene/WorldStreaming.{hpp,cpp}`, opcjonalnie w `Simulation::setWorldStreamer`).
+5. **Akustyka przestrzenna w czasie rzeczywistym (`lumora_runtime`) — zrobione:**
+   - Solver okluzji/Dopplera/pogłosu z filtrami DSP bez alokacji na wątku audio
+     (`runtime/SpatialAcoustics.{hpp,cpp}`, opcjonalnie w `AudioWorld::setAcousticsEnabled`).
+6. **Wypiekanie zasobów i przyrostowa baza (`lumora_assets`) — zrobione:**
+   - Binarny format `.lmesh` z sumą kontrolną oraz przyrostowa baza `AssetDatabase` (hash FNV-1a)
+     (`engine/assets/MeshCooker.{hpp,cpp}`, `engine/assets/AssetDatabase.{hpp,cpp}`).
+7. **Sieć AAA o niskim opóźnieniu (`lumora_runtime`) — zrobione:**
+   - Przewidywanie po stronie klienta, rekoncyliacja i snapshoty delta (`runtime/net/ClientPrediction.{hpp,cpp}`).
+   - Historia póz z cofaniem raycastów (`runtime/net/LagCompensation.{hpp,cpp}`, wpięte w `NetSession`).
 
 ---
 

@@ -1,4 +1,5 @@
 #include "renderer/RestirLighting.hpp"
+#include "platform/Paths.hpp"
 #include "renderer/FrameResources.hpp"
 #include "renderer/RenderContext.hpp"
 #include "scene/Camera.hpp"
@@ -368,11 +369,16 @@ TEST(RestirLighting, SpotLightConeAndEdgeCasesAreSafe) {
 }
 
 TEST(RestirLighting, GpuPassDispatchesCleanlyWhenShadersAndVulkanAvailable) {
-    const char* envDir = std::getenv("LUMORA_RESTIR_TEST_SHADER_DIR");
-    if (envDir == nullptr) {
-        GTEST_SKIP() << "LUMORA_RESTIR_TEST_SHADER_DIR not set; skipping standalone GPU dispatch test";
+    std::filesystem::path shaderDir;
+    if (const char* envDir = std::getenv("LUMORA_RESTIR_TEST_SHADER_DIR");
+        envDir != nullptr && *envDir != '\0') {
+        shaderDir = envDir;
+    } else if (const char* testDir = std::getenv("LUMORA_TEST_SHADER_DIR");
+               testDir != nullptr && *testDir != '\0') {
+        shaderDir = testDir;
+    } else {
+        shaderDir = lumora::paths::shaderDir();
     }
-    const std::filesystem::path shaderDir(envDir);
     if (!std::filesystem::exists(shaderDir / "restir.initial.comp.spv") ||
         !std::filesystem::exists(shaderDir / "restir.spatial.comp.spv")) {
         GTEST_SKIP() << "restir SPIR-V shaders not present in " << shaderDir;
