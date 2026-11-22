@@ -303,12 +303,14 @@ lumora_fetch_files(meshoptimizer https://raw.githubusercontent.com/zeux/meshopti
     LICENSE.md d1bc307ff896c7fc65e3ff4823cc478194f7a5bc6436f99534ebede4d9e2017a
     src/meshoptimizer.h 47b02a8a87f5156a1fec891557e6e263e85087f774d80c0fd197c79d41d3b651
     src/allocator.cpp 73f4397c469353c71f9c8dc78d96418c5045502302f606403c464d6ac45804fe
+    src/clusterizer.cpp b2cade2d0eb8b9a73e7d7da84b5ec9c2ad2327786fdb975f451a2245de8206a2
     src/indexgenerator.cpp 987b96315e14530be0809f7eda31c9e643b5aafa90619cc5acdc6721bccb2be3
     src/simplifier.cpp 05c4cc3606e19f9da8bd40a507f8da33c3b63fa86abbdf6307441936af1b3d7c
     src/vcacheoptimizer.cpp 618429ef4db8ab9b16fde4e73dcf425d89452acbf103085478bc8b1761fa6689
     src/vfetchoptimizer.cpp bf0c01c1d8e9bc474fda3882c630b440553e9fd221c96d785ba08e7c0f0221ff)
 add_library(lumora_meshoptimizer STATIC
     ${meshoptimizer_SOURCE_DIR}/src/allocator.cpp
+    ${meshoptimizer_SOURCE_DIR}/src/clusterizer.cpp
     ${meshoptimizer_SOURCE_DIR}/src/indexgenerator.cpp
     ${meshoptimizer_SOURCE_DIR}/src/simplifier.cpp
     ${meshoptimizer_SOURCE_DIR}/src/vcacheoptimizer.cpp
