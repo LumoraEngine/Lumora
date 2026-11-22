@@ -13,7 +13,9 @@ FetchContent_MakeAvailable(VulkanHeaders)
 # Before the system's include directory everywhere, so every file sees the same headers.
 include_directories(BEFORE SYSTEM ${vulkanheaders_SOURCE_DIR}/include)
 find_package(Vulkan 1.4 REQUIRED)
-find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
+if(LUMORA_BUILD_APP)
+    find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
+endif()
 find_package(Threads REQUIRED)
 
 FetchContent_Declare(glm

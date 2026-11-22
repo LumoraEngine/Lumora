@@ -32,6 +32,7 @@ if(LUMORA_VERSION_SUFFIX)
 endif()
 
 option(LUMORA_BUILD_TESTS "Build Lumora unit tests" ON)
+option(LUMORA_BUILD_APP "Build Qt 6 applications (Hub, Editor, Player)" ON)
 option(LUMORA_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(LUMORA_ENABLE_SANITIZERS "Enable ASan/UBSan (Debug, GCC/Clang)" OFF)
 
