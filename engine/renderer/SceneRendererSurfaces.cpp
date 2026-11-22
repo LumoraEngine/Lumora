@@ -13,10 +13,13 @@
 #include "core/JobSystem.hpp"
 #include "core/Log.hpp"
 #include "renderer/FrameResources.hpp"
+#include "renderer/GpuCulling.hpp"
 #include "renderer/GpuTypes.hpp"
 #include "renderer/LightGrid.hpp"
 #include "renderer/LightProbes.hpp"
 #include "renderer/RenderContext.hpp"
+#include "renderer/RestirLighting.hpp"
+#include "renderer/SdfGi.hpp"
 #include "scene/Landscape.hpp"
 #include "scene/Scene.hpp"
 
@@ -100,6 +103,81 @@ void SceneRenderer::addDepthPasses(SceneFrame& f) {
                 }
             });
         });
+
+    // Optional two-phase Hi-Z GPU occlusion culling after DepthPrepass.
+    if (f.gpuOcclusionCulling) {
+        if (GpuOcclusionCuller* culler = ensureGpuCulling()) {
+            std::vector<CullInstance> instances;
+            instances.reserve(draws.size());
+            for (const Draw& d : draws) {
+                CullInstance inst;
+                inst.aabbCenter = d.center;
+                inst.aabbExtents = d.extent;
+                inst.indexCount = d.mesh != nullptr ? d.mesh->indexCount : 0u;
+                inst.firstIndex = 0u;
+                inst.vertexOffset = 0;
+                inst.objectIndex = d.object;
+                inst.flags = ((d.mesh != nullptr && d.mesh->skinned()) || d.count > 1u)
+                                 ? kCullInstanceSkipOcclusion
+                                 : 0u;
+                instances.push_back(inst);
+            }
+
+            const bool sameViewHistory =
+                culler->hizTexture() != nullptr && culler->hizWidth() == extent.width &&
+                culler->hizHeight() == extent.height &&
+                isTemporalHistoryValid(gpuCullingActiveLastFrame_, gpuCullingLastScene_, f.scene,
+                                       gpuCullingPreviousCameraPosition_, f.camera.position,
+                                       gpuCullingPreviousCameraForward_, f.cameraForward);
+
+            CullConfig cullConfig;
+            cullConfig.frustumCulling = settings.frustumCulling;
+            cullConfig.occlusionCulling = true;
+            cullConfig.nearPlane = f.camera.nearPlane;
+            cullConfig.depthBias = 0.0f;
+
+            graph.addPass(
+                "GpuOcclusionCull",
+                [&](PassBuilder& b) {
+                    b.sample(depth);
+                    b.keepAlways();
+                },
+                [culler, depth, extent, viewProj = fc.viewProjection, cullConfig, sameViewHistory,
+                 instances = std::move(instances)](PassContext& ctx) {
+                    culler->uploadInstances(ctx.cmd, instances);
+                    const auto instanceCount = static_cast<std::uint32_t>(instances.size());
+                    culler->dispatchPhase1(ctx.cmd, ctx.frameBindings(), viewProj, instanceCount, sameViewHistory,
+                                           cullConfig);
+                    culler->buildHiZ(ctx.cmd, ctx.frameBindings(), ctx.texture(depth), ctx.bindlessIndex(depth),
+                                     extent.width, extent.height);
+                    culler->dispatchPhase2(ctx.cmd, ctx.frameBindings(), viewProj, instanceCount, cullConfig);
+                });
+
+            gpuCullingActiveLastFrame_ = true;
+            gpuCullingLastScene_ = &f.scene;
+            gpuCullingPreviousCameraPosition_ = f.camera.position;
+            gpuCullingPreviousCameraForward_ = f.cameraForward;
+            stats.gpuOcclusionCulling = true;
+        } else {
+            gpuCullingActiveLastFrame_ = false;
+        }
+    } else {
+        gpuCullingActiveLastFrame_ = false;
+    }
+
+    // Optional SDF scene ray-traced global illumination after DepthPrepass.
+    if (f.sdfGlobalIllumination) {
+        if (SdfGiPass* sdfGiPass = ensureSdfGi()) {
+            ensureSdfGiVolume(f.scene);
+            ensureSdfGiOutput(extent.width, extent.height);
+            const RGImage giOut = graph.importImage("SdfGiIrradiance", {sdfGiOutput_, sdfGiOutputIndex_});
+            const std::uint32_t giFrame =
+                settings.temporalAntiAliasing ? static_cast<std::uint32_t>(taaFrame_ & 0xFu) : 0u;
+            sdfGiPass->addDispatchPass(graph, giOut, depth, extent.width, extent.height, {}, giFrame);
+            f.sdfGi = giOut;
+            stats.sdfGlobalIllumination = true;
+        }
+    }
 
     RGImage ao{};
     const bool ambientOcclusion = settings.ambientOcclusion && !draws.empty() && extent.width >= 8 && extent.height >= 8;
@@ -280,6 +358,9 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
     RGImage& hdr = f.hdr;
     const RGImage depth = f.depth;
     const bool reflections = f.reflections;
+    RestirPass* restirPass = f.restirDirectLighting ? ensureRestir() : nullptr;
+    const bool restir = restirPass != nullptr;
+    const bool writeSurfaceBuffers = reflections || restir;
     const bool temporal = f.temporal;
     const bool shadows = f.shadows;
     const bool virtualShadows = f.virtualShadows;
@@ -297,8 +378,8 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
     const std::vector<std::uint32_t>& waters = f.waters;
     const GpuMesh* waterGrid = f.waterGrid;
     const std::vector<Draw>& transparents = f.transparents;
-    auto opaquePipeline = [this, reflections](const Draw& d) -> nvrhi::IGraphicsPipeline* {
-        if (reflections) {
+    auto opaquePipeline = [this, writeSurfaceBuffers](const Draw& d) -> nvrhi::IGraphicsPipeline* {
+        if (writeSurfaceBuffers) {
             if (d.mesh->skinned()) return opaqueReflectionsSkinned_;
             return (d.variant & kTwoSided) != 0 ? opaqueReflectionsTwoSided_ : opaqueReflections_;
         }
@@ -309,7 +390,7 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
     const bool parallelOpaque = draws.size() >= settings.parallelRecordingMinDraws;
     stats.parallelRecording = stats.parallelRecording || parallelOpaque;
     RGImage surfaceNormal{}, surfaceSpecular{};
-    if (reflections) {
+    if (writeSurfaceBuffers) {
         surfaceNormal = graph.createImage("SurfaceNormalRoughness", {kSurfaceFormat, extent.width, extent.height});
         surfaceSpecular = graph.createImage("SurfaceSpecular", {kSurfaceFormat, extent.width, extent.height});
     }
@@ -317,7 +398,7 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
         "Opaque",
         [&](PassBuilder& b) {
             b.writeColor(hdr, LoadOp::Load);
-            if (reflections) {
+            if (writeSurfaceBuffers) {
                 b.writeColor(surfaceNormal, LoadOp::Clear);
                 b.writeColor(surfaceSpecular, LoadOp::Clear);
             }
@@ -373,6 +454,32 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
                 }
             });
         });
+
+    // Optional spatio-temporal ReSTIR direct lighting after Opaque surfaces write SurfaceNormalRoughness.
+    if (restir) {
+        restirPass->ensureResources(extent.width, extent.height);
+        const bool resetHistory = !isTemporalHistoryValid(
+            restirActiveLastFrame_, restirLastScene_, f.scene, restirPreviousCameraPosition_, f.camera.position,
+            restirPreviousCameraForward_, f.cameraForward);
+        RestirGraphInputs restirInputs;
+        restirInputs.width = extent.width;
+        restirInputs.height = extent.height;
+        restirInputs.depth = depth;
+        restirInputs.motion = f.motion;
+        restirInputs.normalRoughness = surfaceNormal;
+        restirInputs.outputHdr = graph.importImage("RestirDirectLighting", {restirPass->hdrOutput()});
+        restirInputs.usePreviousViewProjection = true;
+        restirInputs.resetHistory = resetHistory;
+        f.restirHdr = restirPass->addPasses(graph, restirInputs);
+
+        restirActiveLastFrame_ = true;
+        restirLastScene_ = &f.scene;
+        restirPreviousCameraPosition_ = f.camera.position;
+        restirPreviousCameraForward_ = f.cameraForward;
+        stats.restirDirectLighting = f.restirHdr.valid();
+    } else {
+        restirActiveLastFrame_ = false;
+    }
 
     if (!decals.empty()) {
         const GpuMesh* box = &ctx_.meshes().primitive(MeshPrimitive::Cube);

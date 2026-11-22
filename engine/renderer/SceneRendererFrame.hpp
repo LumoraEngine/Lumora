@@ -20,12 +20,23 @@
 #include "renderer/VirtualShadowMap.hpp"
 #include "scene/Scene.hpp"
 
+#include <glm/geometric.hpp>
+
 #include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
 
 namespace lumora::render {
+
+/// Returns true when camera/scene continuity allows reusing previous-frame temporal buffers.
+[[nodiscard]] inline bool isTemporalHistoryValid(bool activeLastFrame, const Scene* lastScene, const Scene& currentScene,
+                                                 const glm::vec3& prevPos, const glm::vec3& currPos,
+                                                 const glm::vec3& prevFwd, const glm::vec3& currFwd) noexcept {
+    return activeLastFrame && lastScene == &currentScene &&
+           glm::distance(currPos, prevPos) <= 5.0f &&
+           glm::dot(currFwd, prevFwd) >= 0.7f;
+}
 
 inline constexpr nvrhi::Format kAoFormat = nvrhi::Format::R8_UNORM;
 inline constexpr nvrhi::Format kMotionFormat = nvrhi::Format::RG16_FLOAT;
@@ -157,6 +168,13 @@ struct SceneFrame {
     RGImage shadowMap{}, vsmPool{}, vsmPageTable{}, localAtlas{};
     RGImage motion{}, ao{}, contact{}, fogVolume{};
     bool ambientOcclusion = false;
+
+    // ---- Optional Wave-1 compute integrations (opt-in via RenderSettings)
+    bool gpuOcclusionCulling = false;
+    bool sdfGlobalIllumination = false;
+    bool restirDirectLighting = false;
+    RGImage sdfGi{};
+    RGImage restirHdr{};
 };
 
 } // namespace lumora::render

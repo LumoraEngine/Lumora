@@ -12,13 +12,18 @@
 #include "core/JobSystem.hpp"
 #include "core/Log.hpp"
 #include "renderer/FrameResources.hpp"
+#include "renderer/GpuCulling.hpp"
 #include "renderer/GpuTypes.hpp"
 #include "renderer/LightGrid.hpp"
 #include "renderer/LightProbes.hpp"
 #include "renderer/RenderContext.hpp"
+#include "renderer/RestirLighting.hpp"
+#include "renderer/SdfGi.hpp"
+#include "renderer/vulkan/VulkanCommon.hpp"
 #include "scene/Landscape.hpp"
 #include "scene/Scene.hpp"
 
+#include <glm/common.hpp>
 #include <glm/geometric.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_access.hpp>
@@ -29,6 +34,8 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <exception>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -350,7 +357,145 @@ SceneRenderer::~SceneRenderer() {
     for (const std::uint32_t index : taaHistoryIndex_) {
         if (index != UINT32_MAX) ctx_.bindless().releaseTexture(index);
     }
+    if (sdfGiOutputIndex_ != UINT32_MAX) ctx_.bindless().releaseTexture(sdfGiOutputIndex_);
+    sdfGiOutput_ = nullptr;
+    restir_.reset();
+    sdfGi_.reset();
+    gpuCulling_.reset();
     for (auto& [file, volume] : probeVolumes_) ctx_.bindless().releaseTexture(volume.index);
+}
+
+namespace {
+
+template <typename T, typename Factory>
+T* lazyInitPass(std::unique_ptr<T>& slot, bool& failed, const char* label, Factory&& factory) {
+    if (slot) return slot.get();
+    if (failed) return nullptr;
+    try {
+        slot = factory();
+    } catch (const std::exception& e) {
+        log::warn("Renderer", "{} disabled: {}", label, e.what());
+        failed = true;
+        return nullptr;
+    }
+    return slot.get();
+}
+
+} // namespace
+
+GpuOcclusionCuller* SceneRenderer::gpuCulling() noexcept { return ensureGpuCulling(); }
+SdfGiPass* SceneRenderer::sdfGi() noexcept { return ensureSdfGi(); }
+RestirPass* SceneRenderer::restir() noexcept { return ensureRestir(); }
+
+GpuOcclusionCuller* SceneRenderer::ensureGpuCulling() {
+    return lazyInitPass(gpuCulling_, gpuCullingFailed_, "GPU occlusion culling",
+                        [this] { return std::make_unique<GpuOcclusionCuller>(ctx_); });
+}
+
+SdfGiPass* SceneRenderer::ensureSdfGi() {
+    return lazyInitPass(sdfGi_, sdfGiFailed_, "SDF global illumination",
+                        [this] { return std::make_unique<SdfGiPass>(ctx_, true); });
+}
+
+RestirPass* SceneRenderer::ensureRestir() {
+    return lazyInitPass(restir_, restirFailed_, "ReSTIR direct lighting",
+                        [this] { return std::make_unique<RestirPass>(ctx_); });
+}
+
+void SceneRenderer::ensureSdfGiOutput(std::uint32_t width, std::uint32_t height) {
+    if (width == 0u || height == 0u) return;
+    if (sdfGiOutput_ && sdfGiWidth_ == width && sdfGiHeight_ == height) return;
+    if (sdfGiOutputIndex_ != UINT32_MAX) {
+        ctx_.bindless().releaseTexture(sdfGiOutputIndex_);
+        sdfGiOutputIndex_ = UINT32_MAX;
+    }
+    sdfGiOutput_ = nullptr;
+    nvrhi::TextureDesc desc;
+    desc.width = width;
+    desc.height = height;
+    desc.format = nvrhi::Format::RGBA16_FLOAT;
+    desc.isShaderResource = true;
+    desc.isUAV = true;
+    desc.debugName = "SdfGiIrradiance";
+    desc.initialState = nvrhi::ResourceStates::ShaderResource;
+    desc.keepInitialState = true;
+    sdfGiOutput_ = ctx_.gpu()->createTexture(desc);
+    if (!sdfGiOutput_) throw rhi::VulkanError("could not create SDF GI output texture", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    sdfGiOutputIndex_ = ctx_.bindless().registerTexture(sdfGiOutput_);
+    sdfGiWidth_ = width;
+    sdfGiHeight_ = height;
+}
+
+void SceneRenderer::ensureSdfGiVolume(const Scene& scene) {
+    SdfGiPass* sdfGiPass = ensureSdfGi();
+    if (sdfGiPass == nullptr) return;
+    if (sdfGiPass->hasVolume() && !sdfGiAutoBuilt_) return;
+
+    const entt::registry& reg = scene.registry();
+    std::uint64_t hash = 1469598103934665603ull;
+    auto mix = [&](std::uint64_t v) noexcept { hash = (hash ^ v) * 1099511628211ull; };
+    auto mixVec3 = [&](const glm::vec3& v) noexcept {
+        mix(std::bit_cast<std::uint32_t>(v.x));
+        mix(std::bit_cast<std::uint32_t>(v.y));
+        mix(std::bit_cast<std::uint32_t>(v.z));
+    };
+
+    glm::vec3 sceneMin(std::numeric_limits<float>::max());
+    glm::vec3 sceneMax(-std::numeric_limits<float>::max());
+    bool anyMesh = false;
+
+    for (auto [entity, mesh, world] : reg.view<MeshRendererComponent, WorldTransformComponent>().each()) {
+        if (!mesh.visible || mesh.opacity < 0.5f) continue;
+        anyMesh = true;
+        mix(static_cast<std::uint64_t>(entt::to_integral(entity)));
+        mix(static_cast<std::uint64_t>(mesh.mesh));
+        for (int col = 0; col < 4; ++col) {
+            for (int row = 0; row < 4; ++row) {
+                mix(std::bit_cast<std::uint32_t>(world.matrix[col][row]));
+            }
+        }
+        mixVec3(mesh.baseColor);
+        mixVec3(mesh.emissive);
+        mix(std::bit_cast<std::uint32_t>(mesh.emissiveStrength));
+        mix(std::bit_cast<std::uint32_t>(mesh.roughness));
+
+        const glm::vec3 localHalf = mesh.mesh == MeshPrimitive::Plane ? glm::vec3(0.5f, 0.02f, 0.5f) : glm::vec3(0.5f);
+        const glm::vec3 center(world.matrix[3]);
+        const glm::mat3 m(world.matrix);
+        const glm::vec3 halfExtents = glm::max(
+            glm::abs(m[0]) * localHalf.x + glm::abs(m[1]) * localHalf.y + glm::abs(m[2]) * localHalf.z,
+            glm::vec3(0.02f));
+        sceneMin = glm::min(sceneMin, center - halfExtents);
+        sceneMax = glm::max(sceneMax, center + halfExtents);
+    }
+
+    for (auto [entity, light, world] : reg.view<LightComponent, WorldTransformComponent>().each()) {
+        if (light.intensity <= 0.0f) continue;
+        mix(static_cast<std::uint64_t>(entt::to_integral(entity)));
+        mix(static_cast<std::uint64_t>(light.type));
+        mixVec3(glm::vec3(world.matrix[3]));
+        mixVec3(glm::vec3(world.matrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+        mixVec3(light.color);
+        mix(std::bit_cast<std::uint32_t>(light.intensity));
+        mix(std::bit_cast<std::uint32_t>(light.range));
+    }
+
+    if (sdfGiPass->hasVolume() && sdfGiAutoBuilt_ && sdfGiSceneHash_ == hash) return;
+
+    SdfGridConfig cfg;
+    cfg.resolution = {32u, 32u, 32u};
+    cfg.raysPerPoint = 8u;
+    if (anyMesh) {
+        const glm::vec3 center = 0.5f * (sceneMin + sceneMax);
+        const glm::vec3 halfExtent =
+            glm::clamp(0.5f * (sceneMax - sceneMin) + glm::vec3(2.0f), glm::vec3(4.0f), glm::vec3(64.0f));
+        cfg.boundsMin = center - halfExtent;
+        cfg.boundsMax = center + halfExtent;
+    }
+    const SdfVolumeData volume = buildSdfVolumeFromScene(scene, cfg);
+    sdfGiPass->uploadVolume(volume);
+    sdfGiAutoBuilt_ = true;
+    sdfGiSceneHash_ = hash;
 }
 
 const SceneRenderer::ProbeVolumeGpu* SceneRenderer::probeVolume(AssetLibrary& assets, const std::string& key) {
@@ -510,6 +655,10 @@ SceneDrawStats SceneRenderer::build(RenderGraph& graph, FrameResources& frame, c
 
     // ---- Render graph ----------------------------------------------------------------------
     const VkExtent2D render = f.renderExtent;  // up to TAA; the output's size after it
+    f.gpuOcclusionCulling = settings.gpuOcclusionCulling && render.width > 0 && render.height > 0;
+    f.sdfGlobalIllumination = settings.sdfGlobalIllumination && render.width > 0 && render.height > 0;
+    f.restirDirectLighting = settings.restirDirectLighting && render.width > 0 && render.height > 0 &&
+                             opaqueReflections_ && opaqueReflectionsTwoSided_ && opaqueReflectionsSkinned_;
     f.hdr = graph.createImage("SceneColorHDR", {ctx_.hdrFormat(), render.width, render.height});
     f.depth = graph.createImage("SceneDepth", {ctx_.depthFormat(), render.width, render.height});
     f.stats.renderWidth = render.width;

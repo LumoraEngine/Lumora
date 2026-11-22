@@ -14,6 +14,7 @@
 #include <entt/entity/entity.hpp>
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <unordered_map>
 
@@ -26,7 +27,10 @@ struct MaterialProgram;
 
 namespace lumora::render {
 
+class GpuOcclusionCuller;
 class RenderContext;
+class RestirPass;
+class SdfGiPass;
 struct FrameResources;
 
 struct RenderSettings {
@@ -98,6 +102,13 @@ struct RenderSettings {
     /// The frame's intermediate images share textures when they are not needed at the same time
     /// (less video memory). False gives each its own (for comparing, or hunting a bad pass).
     bool shareTransientTextures = true;
+    /// Two-phase Hi-Z GPU occlusion culling (builds a reversed-Z Hi-Z pyramid after the depth
+    /// prepass and dispatches Phase-1 / Phase-2 indirect culling compute passes).
+    bool gpuOcclusionCulling = false;
+    /// SDF scene voxelization and ray-traced global illumination compute pass.
+    bool sdfGlobalIllumination = false;
+    /// Spatio-temporal ReSTIR direct lighting compute pass for point and spot lights.
+    bool restirDirectLighting = false;
 };
 
 struct SceneDrawStats {
@@ -132,6 +143,9 @@ struct SceneDrawStats {
     std::uint32_t virtualPagesRendered = 0;   // drawn this frame
     bool environmentLit = false;  // an HDR environment lit the frame
     bool ambientOcclusion = false;
+    bool gpuOcclusionCulling = false;
+    bool sdfGlobalIllumination = false;
+    bool restirDirectLighting = false;
 };
 
 /// Orthographic sun transform covering the camera frustum up to `distance` (one cascade),
@@ -168,6 +182,14 @@ public:
     SceneDrawStats build(RenderGraph& graph, FrameResources& frame, const Scene& scene, const CameraView& camera,
                          const RenderSettings& settings, RGImage output, nvrhi::Format outputFormat, VkExtent2D extent,
                          double timeSeconds);
+
+    [[nodiscard]] GpuOcclusionCuller* gpuCulling() noexcept;
+    [[nodiscard]] const GpuOcclusionCuller* gpuCulling() const noexcept { return gpuCulling_.get(); }
+    [[nodiscard]] SdfGiPass* sdfGi() noexcept;
+    [[nodiscard]] const SdfGiPass* sdfGi() const noexcept { return sdfGi_.get(); }
+    [[nodiscard]] RestirPass* restir() noexcept;
+    [[nodiscard]] const RestirPass* restir() const noexcept { return restir_.get(); }
+    [[nodiscard]] nvrhi::ITexture* sdfGiOutput() const noexcept { return sdfGiOutput_; }
 
 private:
     // The phases of build(), in order.
@@ -345,6 +367,33 @@ private:
     };
     std::unordered_map<std::string, ProbeVolumeGpu> probeVolumes_;
     [[nodiscard]] const ProbeVolumeGpu* probeVolume(AssetLibrary& assets, const std::string& key);
+
+    [[nodiscard]] GpuOcclusionCuller* ensureGpuCulling();
+    [[nodiscard]] SdfGiPass* ensureSdfGi();
+    [[nodiscard]] RestirPass* ensureRestir();
+    void ensureSdfGiVolume(const Scene& scene);
+    void ensureSdfGiOutput(std::uint32_t width, std::uint32_t height);
+
+    std::unique_ptr<GpuOcclusionCuller> gpuCulling_;
+    std::unique_ptr<SdfGiPass> sdfGi_;
+    std::unique_ptr<RestirPass> restir_;
+    bool gpuCullingFailed_ = false;
+    bool sdfGiFailed_ = false;
+    bool restirFailed_ = false;
+    bool gpuCullingActiveLastFrame_ = false;
+    const Scene* gpuCullingLastScene_ = nullptr;
+    glm::vec3 gpuCullingPreviousCameraPosition_{0.0f};
+    glm::vec3 gpuCullingPreviousCameraForward_{0.0f, 0.0f, -1.0f};
+    bool sdfGiAutoBuilt_ = false;
+    std::uint64_t sdfGiSceneHash_ = 0;
+    nvrhi::TextureHandle sdfGiOutput_;
+    std::uint32_t sdfGiOutputIndex_ = UINT32_MAX;
+    std::uint32_t sdfGiWidth_ = 0;
+    std::uint32_t sdfGiHeight_ = 0;
+    bool restirActiveLastFrame_ = false;
+    const Scene* restirLastScene_ = nullptr;
+    glm::vec3 restirPreviousCameraPosition_{0.0f};
+    glm::vec3 restirPreviousCameraForward_{0.0f, 0.0f, -1.0f};
 };
 
 } // namespace lumora::render
