@@ -2,6 +2,8 @@
 
 #include "core/Error.hpp"
 #include "core/Uuid.hpp"
+#include "runtime/net/ClientPrediction.hpp"
+#include "runtime/net/LagCompensation.hpp"
 #include "runtime/net/Transport.hpp"
 
 #include <entt/entity/entity.hpp>
@@ -144,6 +146,11 @@ public:
     void setClock(std::function<double()> clock) { clock_ = std::move(clock); }
     [[nodiscard]] Transport* transport() noexcept { return transport_.get(); }
 
+    [[nodiscard]] PredictionController& prediction() noexcept { return prediction_; }
+    [[nodiscard]] const PredictionController& prediction() const noexcept { return prediction_; }
+    [[nodiscard]] LagCompHistory& lagCompensation() noexcept { return lagComp_; }
+    [[nodiscard]] const LagCompHistory& lagCompensation() const noexcept { return lagComp_; }
+
     struct Pose {
         glm::vec3 position{0.0f};
         glm::vec3 rotation{0.0f};  // Euler degrees, as TransformComponent
@@ -196,6 +203,7 @@ private:
     void routeRpc(PeerId sender, std::uint32_t id, const std::string& name, const std::string& data, RpcTarget target);
     void applyAuthority(Replica& replica);
     void smooth(double dt);
+    void recordLagCompSnapshots(double simTime);
     [[nodiscard]] Replica* replicaOf(entt::entity entity);
     [[nodiscard]] const Replica* replicaOf(entt::entity entity) const;
     [[nodiscard]] Replica* replica(std::uint32_t id);
@@ -233,6 +241,9 @@ private:
     double sendInterval_ = 1.0 / 30.0;
     double sendTimer_ = 0.0;
     double delay_ = 0.1;
+    PredictionController prediction_{};
+    LagCompHistory lagComp_{};
+    std::unordered_set<entt::entity> lagCompTracked_;
 };
 
 } // namespace lumora::net

@@ -7,6 +7,7 @@
 #include "scene/Prefab.hpp"
 #include "scene/Scene.hpp"
 
+#include <glm/geometric.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <nlohmann/json.hpp>
@@ -324,9 +325,47 @@ void NetSession::resetReplication() {
     outgoing_.clear();
     nextId_ = 1;
     sendTimer_ = 0.0;
+    lagComp_.clear();
+    lagCompTracked_.clear();
 }
 
 namespace {
+
+std::vector<HitCapsule> buildEntityHitboxes(const entt::registry& reg, entt::entity e, const glm::vec3& absScale) {
+    if (const auto* cc = reg.try_get<CharacterControllerComponent>(e)) {
+        const float r = std::max(cc->radius * std::max(absScale.x, absScale.z), 1e-3f);
+        const float h = std::max(cc->height * absScale.y, 2.0f * r);
+        return {HitCapsule{glm::vec3{0.0f, r, 0.0f}, glm::vec3{0.0f, h - r, 0.0f}, r, HitboxPart::Body}};
+    }
+    if (const auto* col = reg.try_get<ColliderComponent>(e)) {
+        const glm::vec3 offset = col->offset * absScale;
+        switch (col->shape) {
+            case ColliderShape::Sphere: {
+                const float r = std::max(col->radius * std::max({absScale.x, absScale.y, absScale.z}), 1e-3f);
+                return {HitCapsule{offset, offset, r, HitboxPart::Body}};
+            }
+            case ColliderShape::Capsule: {
+                const float r = std::max(col->radius * std::max(absScale.x, absScale.z), 1e-3f);
+                const float hh = std::max(col->height * absScale.y * 0.5f, 0.0f);
+                return {HitCapsule{offset - glm::vec3{0.0f, hh, 0.0f}, offset + glm::vec3{0.0f, hh, 0.0f}, r,
+                                   HitboxPart::Body}};
+            }
+            case ColliderShape::Box: {
+                const glm::vec3 half = glm::max(col->size * absScale * 0.5f, glm::vec3{1e-3f});
+                int maxAxis = 0;
+                if (half.y > half[maxAxis]) maxAxis = 1;
+                if (half.z > half[maxAxis]) maxAxis = 2;
+                const float r = std::max(0.5f * (half[(maxAxis + 1) % 3] + half[(maxAxis + 2) % 3]), 1e-3f);
+                const float segHalf = std::max(half[maxAxis] - r, 0.0f);
+                glm::vec3 axisVec{0.0f};
+                axisVec[maxAxis] = segHalf;
+                return {HitCapsule{offset - axisVec, offset + axisVec, r, HitboxPart::Body}};
+            }
+        }
+    }
+    const float r = std::max(0.5f * std::max({absScale.x, absScale.y, absScale.z}), 1e-3f);
+    return {HitCapsule{glm::vec3{0.0f}, glm::vec3{0.0f}, r, HitboxPart::Body}};
+}
 
 /// The entity or ancestor a spawn or clone made (entt::null for the scene file's entities).
 entt::entity spawnRootOf(const Scene& scene, entt::entity e) {
@@ -358,6 +397,7 @@ void NetSession::registerSceneEntities() {
 void NetSession::sceneLoaded(const std::string& path) {
     scenePath_ = path;
     resetReplication();
+    prediction_.reset();
     if (role_ != NetRole::Host) return;
     ++epoch_;
     registerSceneEntities();
@@ -718,6 +758,7 @@ void NetSession::endStep(double dt, double simTime) {
         }
         smooth(dt);
     }
+    recordLagCompSnapshots(simTime);
     if (transport_) {
         for (NetEvent& e : transport_->poll(now())) pending_.push_back(std::move(e));
     }
@@ -825,6 +866,7 @@ void NetSession::smooth(double dt) {
         }
     }
     auto& reg = scene_.registry();
+    bool movedAny = false;
     for (auto& [id, r] : replicas_) {
         if (r.samples.empty() || r.owner == localPeer() || !reg.valid(r.entity)) continue;
         const auto* identity = reg.try_get<NetworkIdentityComponent>(r.entity);
@@ -832,6 +874,7 @@ void NetSession::smooth(double dt) {
         auto& s = r.samples;
         if (!identity->interpolate) {
             setPose(r.entity, s.back().pose);
+            movedAny = true;
             continue;
         }
         const PeerId source = role_ == NetRole::Client ? kHostPeer : r.owner;
@@ -848,6 +891,43 @@ void NetSession::smooth(double dt) {
             const auto f = static_cast<float>(span > 1e-9 ? (t - a.time) / span : 1.0);
             setPose(r.entity, mix(a.pose, b.pose, std::clamp(f, 0.0f, 1.0f)));
         }
+        movedAny = true;
+    }
+    if (movedAny) scene_.updateWorldTransforms();
+}
+
+void NetSession::recordLagCompSnapshots(double simTime) {
+    auto& reg = scene_.registry();
+    for (auto it = lagCompTracked_.begin(); it != lagCompTracked_.end();) {
+        if (!reg.valid(*it) || !reg.all_of<NetworkIdentityComponent>(*it)) {
+            lagComp_.removeEntity(*it);
+            it = lagCompTracked_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto [e, identity, transform] : reg.view<NetworkIdentityComponent, TransformComponent>().each()) {
+        (void)identity;
+        const glm::mat4 world = scene_.parentOf(e) == entt::null ? transform.localMatrix() : scene_.worldMatrix(e);
+        EntityPoseSnapshot snap;
+        snap.timestamp = simTime;
+        snap.position = glm::vec3(world[3]);
+        glm::mat3 rotMat(world);
+        glm::vec3 absScale(1.0f);
+        bool validBasis = true;
+        for (int i = 0; i < 3; ++i) {
+            const float len = glm::length(rotMat[i]);
+            absScale[i] = len;
+            if (len > 1e-8f) {
+                rotMat[i] /= len;
+            } else {
+                validBasis = false;
+            }
+        }
+        snap.rotation = validBasis ? glm::normalize(glm::quat_cast(rotMat)) : glm::quat{1.0f, 0.0f, 0.0f, 0.0f};
+        snap.hitboxes = buildEntityHitboxes(reg, e, absScale);
+        lagComp_.recordSnapshot(e, snap);
+        lagCompTracked_.insert(e);
     }
 }
 

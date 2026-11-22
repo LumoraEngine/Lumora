@@ -4,8 +4,10 @@
 #include <filesystem>
 
 #include "core/Error.hpp"
+#include "runtime/RvoCrowd.hpp"
 #include "scene/DebugDraw.hpp"
 #include "scene/Hud.hpp"
+#include "scene/WorldStreaming.hpp"
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -56,6 +58,11 @@ public:
     [[nodiscard]] PhysicsWorld* physics() noexcept { return physics_.get(); }
     /// Navigation mesh and agents (the mesh is built from the static colliders on first use).
     [[nodiscard]] NavigationWorld& navigation() noexcept { return *navigation_; }
+    /// 2D RVO2/ORCA crowd local collision-avoidance solver.
+    [[nodiscard]] RvoCrowd& rvoCrowd() noexcept { return *rvoCrowd_; }
+    /// Optional open-world spatial sector streamer (null until configured with a non-empty root).
+    [[nodiscard]] WorldStreamer* worldStreamer() noexcept { return worldStreamer_.get(); }
+    void setWorldStreamer(std::filesystem::path sectorRoot, StreamingConfig config = {});
 
     /// Runs the game library's behaviours (ScriptComponent) every step; `input` is read by
     /// keyDown() and may be null. Called again with a new library (hot reload), the running
@@ -111,6 +118,8 @@ private:
     bool audioDevice_ = true;  // whether sound for a loaded scene goes to the audio device
     std::unique_ptr<SaveData> save_;
     std::unique_ptr<NavigationWorld> navigation_;
+    std::unique_ptr<RvoCrowd> rvoCrowd_;
+    std::unique_ptr<WorldStreamer> worldStreamer_;
     std::unique_ptr<Localization> localization_;
     std::unique_ptr<TimelineSystem> timelines_;
     std::unique_ptr<PhysicsWorld> physics_;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Error.hpp"
+#include "runtime/SpatialAcoustics.hpp"
 
 #include <entt/entity/entity.hpp>
 #include <glm/mat4x4.hpp>
@@ -9,10 +10,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string_view>
 
 namespace lumora {
 
+class PhysicsWorld;
 class Scene;
 
 /// Sound for a running simulation (miniaudio): one voice per entity with an AudioSourceComponent,
@@ -39,6 +42,8 @@ public:
     void setListener(const glm::vec3& position, const glm::vec3& forward, const glm::vec3& up);
     /// Places the listener at a camera (its view matrix).
     void setListenerFromView(const glm::mat4& view);
+    /// Sets the listener's world velocity (m/s) for Doppler calculations.
+    void setListenerVelocity(const glm::vec3& velocity);
     /// Volume of everything (the game's settings), 0..1.
     void setMasterVolume(float volume);
     /// Mixer buses by name: "Master", "Music", "SFX", "UI", "Voice", "Ambience" (case-insensitive).
@@ -47,6 +52,12 @@ public:
     [[nodiscard]] float busVolume(std::string_view bus) const;  // -1 for an unknown bus
     bool setBusMuted(std::string_view bus, bool muted);
     [[nodiscard]] bool busMuted(std::string_view bus) const;
+
+    /// Optional physics world for ray-traced spatial acoustics (occlusion, reverb, Doppler).
+    void setPhysics(const PhysicsWorld* physics);
+    void setAcousticsEnabled(bool enabled);
+    [[nodiscard]] bool acousticsEnabled() const noexcept;
+    [[nodiscard]] std::optional<AcousticSourceResult> lastAcousticsFor(entt::entity entity) const;
 
     /// Pauses or resumes every sound (play mode paused).
     void setPaused(bool paused);

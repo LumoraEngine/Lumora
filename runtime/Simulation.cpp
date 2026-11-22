@@ -22,6 +22,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
+#include <utility>
 
 namespace lumora {
 
@@ -63,7 +65,8 @@ void Simulation::runOscillators(float dt) {
 
 Simulation::Simulation(Scene& scene, double fixedStep)
     : scene_(scene), fixedStep_(fixedStep > 0.0 ? fixedStep : kDefaultFixedStep),
-      navigation_(std::make_unique<NavigationWorld>(scene)), localization_(std::make_unique<Localization>()),
+      navigation_(std::make_unique<NavigationWorld>(scene)), rvoCrowd_(std::make_unique<RvoCrowd>()),
+      localization_(std::make_unique<Localization>()),
       timelines_(std::make_unique<TimelineSystem>(scene, std::filesystem::path())) {
     if (PhysicsWorld::sceneHasColliders(scene_)) physics_ = std::make_unique<PhysicsWorld>(scene_);
     net::NetSession::Hooks hooks;
@@ -144,8 +147,19 @@ void Simulation::setProjectRoot(std::filesystem::path root) {
 
 void Simulation::setAudio(std::unique_ptr<AudioWorld> audio) {
     audio_ = std::move(audio);
-    if (audio_) audioDevice_ = audio_->usesDevice();
+    if (audio_) {
+        audioDevice_ = audio_->usesDevice();
+        audio_->setPhysics(physics_.get());
+    }
     if (scripts_) scripts_->setAudio(audio_.get());
+}
+
+void Simulation::setWorldStreamer(std::filesystem::path sectorRoot, StreamingConfig config) {
+    if (sectorRoot.empty()) {
+        worldStreamer_.reset();
+        return;
+    }
+    worldStreamer_ = std::make_unique<WorldStreamer>(std::move(sectorRoot), config);
 }
 
 std::size_t Simulation::scriptInstances() const noexcept { return scripts_ ? scripts_->instanceCount() : 0; }
@@ -165,12 +179,14 @@ void Simulation::step() {
     runOscillators(dt);
     timelines_->update(dt, animation_.get(), audio_.get());
     if (animation_) animation_->update(dt);
+    if (rvoCrowd_ && rvoCrowd_->agentCount() > 0) rvoCrowd_->step(dt);
     scene_.updateWorldTransforms();
     if (!physics_ && PhysicsWorld::sceneHasColliders(scene_)) {
         // Colliders appeared during play (a script cloned one): start the physics world now.
         physics_ = std::make_unique<PhysicsWorld>(scene_);
         physics_->setProjectRoot(projectRoot_);
         if (scripts_) scripts_->setPhysics(physics_.get());
+        if (audio_) audio_->setPhysics(physics_.get());
     }
     navigation_->update(dt, physics_.get());  // agents' steps go into this physics step
     if (physics_) {
@@ -178,6 +194,7 @@ void Simulation::step() {
         scene_.updateWorldTransforms();
         if (scripts_) scripts_->dispatchCollisions(physics_->takeContacts());
     }
+    if (worldStreamer_) worldStreamer_->commitReadySectors(scene_);
     if (save_) save_->flushIfDue();
     updateParticles(scene_, dt);  // after physics: emitters on moving bodies emit from where they are
     // Shared entities: updates out, smoothed movement of what others move in.
@@ -204,15 +221,22 @@ Result<> Simulation::loadScene(const std::filesystem::path& relativePath) {
     if (!loaded) return makeError("loadScene {}: {}", relative.generic_string(), loaded.error().message);
     // Systems that hold on to entities go first, the behaviours (their destructors) before all.
     if (scripts_) scripts_->restart();
+    if (audio_) audio_->setPhysics(nullptr);
     physics_.reset();
     animation_.reset();
     const bool hadAudio = audio_ != nullptr;
     audio_.reset();
+    std::optional<std::pair<std::filesystem::path, StreamingConfig>> streamerCfg;
+    if (worldStreamer_) {
+        streamerCfg.emplace(worldStreamer_->sectorRoot(), worldStreamer_->config());
+        worldStreamer_.reset();
+    }
     oscillatorOrigins_.clear();
     hud_.clear();
     debug_.clear();
     navigation_ = std::make_unique<NavigationWorld>(scene_);
     navigation_->setProjectRoot(projectRoot_);
+    rvoCrowd_ = std::make_unique<RvoCrowd>();
     timelines_ = std::make_unique<TimelineSystem>(scene_, projectRoot_);
     if (scripts_) scripts_->setTimelines(timelines_.get());
     if (auto replaced = SceneSerializer::loadInto(scene_, SceneSerializer::toJson(**loaded)); !replaced) {
@@ -233,6 +257,10 @@ Result<> Simulation::loadScene(const std::filesystem::path& relativePath) {
         } else {
             log::warn("Simulation", "{} - no sound in {}", audio.error().message, relative.generic_string());
         }
+    }
+    if (audio_) audio_->setPhysics(physics_.get());
+    if (streamerCfg.has_value()) {
+        worldStreamer_ = std::make_unique<WorldStreamer>(std::move(streamerCfg->first), streamerCfg->second);
     }
     if (scripts_) {
         scripts_->setPhysics(physics_.get());

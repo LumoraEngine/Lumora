@@ -1,5 +1,8 @@
 #pragma once
 
+#include "runtime/ActiveRagdoll.hpp"
+#include "runtime/VehicleDynamics.hpp"
+
 #include <entt/entity/entity.hpp>
 #include <glm/vec3.hpp>
 
@@ -75,6 +78,13 @@ public:
     bool driveVehicle(entt::entity entity, float throttle, float steering, float brake, float handbrake);
     /// Forward speed of a vehicle in m/s (negative when reversing).
     [[nodiscard]] float vehicleSpeed(entt::entity entity) const;
+    /// Advanced Pacejka / powertrain drivetrain simulator attached to a VehicleComponent entity.
+    [[nodiscard]] VehicleDrivetrainSim* vehicleDrivetrain(entt::entity entity);
+    [[nodiscard]] std::optional<VehicleTelemetry> vehicleTelemetry(entt::entity entity) const;
+    /// Drives an active ragdoll's bodies via PID motor torques from `targetPose`.
+    bool driveActiveRagdoll(entt::entity entity, const DualSkeletonState& targetPose, float stiffnessMultiplier = 1.0f);
+    /// Snapshots an active ragdoll's physical bone transforms and velocities for DualSkeletonState::update().
+    [[nodiscard]] std::vector<RagdollBoneSample> ragdollBoneSamples(entt::entity entity) const;
 
     /// Pairs of entities whose bodies started touching since the last call (each pair once).
     [[nodiscard]] std::vector<std::pair<entt::entity, entt::entity>> takeContacts();

@@ -1,9 +1,11 @@
 #include "runtime/PhysicsWorld.hpp"
 
 #include "core/Log.hpp"
+#include "runtime/ProceduralIk.hpp"
 #include "scene/Landscape.hpp"
 #include "scene/Scene.hpp"
 
+#include <glm/geometric.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
@@ -46,6 +48,7 @@
 #include <algorithm>
 #include <array>
 #include <cfloat>
+#include <cmath>
 #include <functional>
 #include <cstdarg>
 #include <cstdio>
@@ -282,12 +285,22 @@ struct PhysicsWorld::Impl {
         JPH::Ref<JPH::VehicleConstraint> constraint;
         JPH::Ref<JPH::VehicleCollisionTester> tester;
         std::array<entt::entity, 4> wheels{entt::null, entt::null, entt::null, entt::null};
+        VehicleDrivetrainSim drivetrain;
+        VehicleTelemetry lastTelemetry{};
+        float lastThrottle = 0.0f;
+        float lastSteering = 0.0f;
+        float lastBrake = 0.0f;
+        float lastHandbrake = 0.0f;
     };
     std::unordered_map<entt::entity, Vehicle> vehicles;
     struct RagdollInstance {
         JPH::Ref<JPH::Ragdoll> ragdoll;
         std::vector<entt::entity> bones;  // in skeleton order (parents first)
         std::vector<glm::vec3> scales;    // world scale of each bone
+        std::vector<int> parents;
+        std::vector<float> boneMasses;
+        std::vector<glm::quat> restWorldRotations;
+        DualSkeletonState fallbackDual;
     };
     std::unordered_map<entt::entity, RagdollInstance> ragdolls;
     JPH::CollisionGroup::GroupID nextRagdollGroup = 1;
@@ -601,6 +614,14 @@ struct PhysicsWorld::Impl {
         v.constraint = new JPH::VehicleConstraint(lock.GetBody(), settings);
         v.tester = new JPH::VehicleCollisionTesterCastCylinder(Layers::kMoving);
         v.constraint->SetVehicleCollisionTester(v.tester);
+        VehicleDynamicsConfig dynCfg;
+        dynCfg.powertrain.wheelRadius = radius;
+        dynCfg.powertrain.maxSteerDeg = std::clamp(vc.maxSteerDeg, 0.0f, 80.0f);
+        dynCfg.suspension.restLength = std::max(vc.suspensionLength, 0.05f);
+        dynCfg.suspension.maxTravel = std::max(vc.suspensionLength * 0.8f, 0.02f);
+        v.drivetrain.setConfig(dynCfg);
+        v.lastTelemetry.engineRpm = v.drivetrain.engineRpm();
+        v.lastTelemetry.currentGear = v.drivetrain.currentGear();
         static constexpr const char* kWheelNames[4] = {"Wheel FL", "Wheel FR", "Wheel RL", "Wheel RR"};
         for (entt::entity child : scene.childrenOf(e)) {
             for (int i = 0; i < 4; ++i) {
@@ -726,7 +747,10 @@ struct PhysicsWorld::Impl {
                 part.mToParent = joint;
             }
             r.scales.push_back(poses[i].scale);
+            r.restWorldRotations.push_back(poses[i].rotation);
         }
+        r.parents = parents;
+        r.boneMasses.assign(n, massPerBone);
         skeleton->CalculateParentJointIndices();
         settings->Stabilize();
         settings->DisableParentChildCollisions();
@@ -762,6 +786,30 @@ struct PhysicsWorld::Impl {
         for (auto [e, rc] : reg.view<RagdollComponent>().each()) {
             if (rc.active && !ragdolls.contains(e)) createRagdoll(e, rc);
         }
+    }
+
+    [[nodiscard]] std::vector<RagdollBoneSample> buildRagdollBoneSamples(const RagdollInstance& r) const {
+        std::vector<RagdollBoneSample> samples;
+        if (!r.ragdoll) return samples;
+        const std::size_t n = std::min(r.bones.size(), r.ragdoll->GetBodyCount());
+        samples.resize(n);
+        const JPH::BodyLockInterface& lockIf = system.GetBodyLockInterface();
+        for (std::size_t i = 0; i < n; ++i) {
+            RagdollBoneSample& s = samples[i];
+            s.parentIndex = i < r.parents.size() ? r.parents[i] : -1;
+            s.mass = i < r.boneMasses.size() ? r.boneMasses[i] : 1.0f;
+            s.targetRotation = i < r.restWorldRotations.size() ? r.restWorldRotations[i] : glm::quat{1.0f, 0.0f, 0.0f, 0.0f};
+            JPH::BodyLockRead lock(lockIf, r.ragdoll->GetBodyID(static_cast<int>(i)));
+            if (lock.Succeeded()) {
+                const JPH::Body& body = lock.GetBody();
+                s.physicalPosition = fromJolt(JPH::Vec3(body.GetCenterOfMassPosition()));
+                s.physicalRotation = fromJolt(body.GetRotation());
+                s.linearVelocity = fromJolt(body.GetLinearVelocity());
+                s.angularVelocity = fromJolt(body.GetAngularVelocity());
+                s.targetPosition = s.physicalPosition;
+            }
+        }
+        return samples;
     }
 
     void createCharacter(entt::entity e) {
@@ -958,9 +1006,13 @@ std::size_t PhysicsWorld::ragdollBodyCount() const {
 bool PhysicsWorld::driveVehicle(entt::entity entity, float throttle, float steering, float brake, float handbrake) {
     const auto it = impl_->vehicles.find(entity);
     if (it == impl_->vehicles.end() || !it->second.constraint) return false;
+    it->second.lastThrottle = std::clamp(throttle, -1.0f, 1.0f);
+    it->second.lastSteering = std::clamp(steering, -1.0f, 1.0f);
+    it->second.lastBrake = std::clamp(brake, 0.0f, 1.0f);
+    it->second.lastHandbrake = std::clamp(handbrake, 0.0f, 1.0f);
     auto* controller = static_cast<JPH::WheeledVehicleController*>(it->second.constraint->GetController());
-    controller->SetDriverInput(std::clamp(throttle, -1.0f, 1.0f), std::clamp(steering, -1.0f, 1.0f),
-                               std::clamp(brake, 0.0f, 1.0f), std::clamp(handbrake, 0.0f, 1.0f));
+    controller->SetDriverInput(it->second.lastThrottle, it->second.lastSteering,
+                               it->second.lastBrake, it->second.lastHandbrake);
     if (throttle != 0.0f || steering != 0.0f) impl_->system.GetBodyInterface().ActivateBody(impl_->bodies.at(entity).id);
     return true;
 }
@@ -971,6 +1023,84 @@ float PhysicsWorld::vehicleSpeed(entt::entity entity) const {
     const JPH::Body* body = it->second.constraint->GetVehicleBody();
     const JPH::Vec3 forward = body->GetRotation() * it->second.constraint->GetLocalForward();
     return body->GetLinearVelocity().Dot(forward);
+}
+
+VehicleDrivetrainSim* PhysicsWorld::vehicleDrivetrain(entt::entity entity) {
+    const auto it = impl_->vehicles.find(entity);
+    if (it == impl_->vehicles.end() || !it->second.constraint) return nullptr;
+    return &it->second.drivetrain;
+}
+
+std::optional<VehicleTelemetry> PhysicsWorld::vehicleTelemetry(entt::entity entity) const {
+    const auto it = impl_->vehicles.find(entity);
+    if (it == impl_->vehicles.end() || !it->second.constraint) return std::nullopt;
+    return it->second.lastTelemetry;
+}
+
+std::vector<RagdollBoneSample> PhysicsWorld::ragdollBoneSamples(entt::entity entity) const {
+    const auto it = impl_->ragdolls.find(entity);
+    if (it == impl_->ragdolls.end() || !it->second.ragdoll) return {};
+    return impl_->buildRagdollBoneSamples(it->second);
+}
+
+bool PhysicsWorld::driveActiveRagdoll(entt::entity entity, const DualSkeletonState& targetPose,
+                                      float stiffnessMultiplier) {
+    auto it = impl_->ragdolls.find(entity);
+    if (it == impl_->ragdolls.end()) {
+        const auto* rc = impl_->scene.registry().valid(entity)
+                             ? impl_->scene.registry().try_get<RagdollComponent>(entity)
+                             : nullptr;
+        if (rc != nullptr && rc->active) {
+            impl_->syncRagdolls();
+            it = impl_->ragdolls.find(entity);
+        }
+    }
+    if (it == impl_->ragdolls.end() || !it->second.ragdoll || it->second.bones.empty()) return false;
+    Impl::RagdollInstance& r = it->second;
+    const float stiffness = std::isfinite(stiffnessMultiplier) ? std::max(0.0f, stiffnessMultiplier) : 0.0f;
+
+    bool hasEvaluatedOutput = false;
+    const std::size_t targetCount = targetPose.boneCount();
+    for (std::size_t i = 0; i < targetCount; ++i) {
+        if (targetPose.jointState(i).initialized) {
+            hasEvaluatedOutput = true;
+            break;
+        }
+    }
+
+    const std::vector<glm::vec3>* torques = nullptr;
+    float torqueScale = 1.0f;
+    if (hasEvaluatedOutput) {
+        torques = &targetPose.lastOutput().netBodyTorques;
+        torqueScale = stiffness;
+    } else {
+        const std::vector<RagdollBoneSample> samples = impl_->buildRagdollBoneSamples(r);
+        r.fallbackDual.setDefaultConfig(targetPose.defaultConfig());
+        r.fallbackDual.setDriveRoot(targetPose.driveRoot());
+        r.fallbackDual.setApplyParentReaction(targetPose.applyParentReaction());
+        for (std::size_t i = 0; i < samples.size(); ++i) {
+            r.fallbackDual.setJointDriveSpace(i, targetPose.jointDriveSpace(i));
+            if (i < targetCount) {
+                r.fallbackDual.setJointConfig(i, targetPose.jointConfig(i));
+            }
+        }
+        const DualSkeletonOutput& out = r.fallbackDual.update(samples, 1.0f / 60.0f, stiffness);
+        torques = &out.netBodyTorques;
+        torqueScale = 1.0f;
+    }
+
+    if (torques == nullptr) return false;
+    JPH::BodyInterface& bi = impl_->system.GetBodyInterface();
+    const std::size_t bodyCount = std::min(torques->size(), r.ragdoll->GetBodyCount());
+    for (std::size_t i = 0; i < bodyCount; ++i) {
+        const glm::vec3 torque = (*torques)[i] * torqueScale;
+        if (!std::isfinite(torque.x) || !std::isfinite(torque.y) || !std::isfinite(torque.z)) continue;
+        if (glm::dot(torque, torque) <= 1e-10f) continue;
+        const JPH::BodyID id = r.ragdoll->GetBodyID(static_cast<int>(i));
+        bi.AddTorque(id, toJolt(torque));
+        bi.ActivateBody(id);
+    }
+    return true;
 }
 
 void PhysicsWorld::setGravity(const glm::vec3& gravity) { impl_->system.SetGravity(toJolt(gravity)); }
@@ -1108,8 +1238,46 @@ void PhysicsWorld::step(float dt) {
 
     // Wheels named "Wheel FL/FR/RL/RR" under a vehicle follow its wheels (cylinders stand on Y,
     // so the wheel's axle is the model's Y axis).
-    for (const auto& [entity, v] : impl_->vehicles) {
+    for (auto& [entity, v] : impl_->vehicles) {
         if (!v.constraint) continue;
+        const JPH::Body* vBody = v.constraint->GetVehicleBody();
+        const JPH::Quat vRot = vBody->GetRotation();
+        const JPH::Vec3 vFwd = vRot * v.constraint->GetLocalForward();
+        const JPH::Vec3 vUp = vRot * v.constraint->GetLocalUp();
+        const JPH::Vec3 vRight = vFwd.Cross(vUp);
+        const JPH::Vec3 vVel = vBody->GetLinearVelocity();
+        const float forwardSpeedMs = vVel.Dot(vFwd);
+        const float lateralSpeedMs = vVel.Dot(vRight);
+
+        std::array<float, kVehicleWheelCount> wheelLoadsN{};
+        std::array<bool, kVehicleWheelCount> wheelContacts{};
+        const JPH::Wheels& joltWheels = v.constraint->GetWheels();
+        for (std::size_t i = 0; i < kVehicleWheelCount && i < joltWheels.size(); ++i) {
+            const JPH::Wheel* wheel = joltWheels[i];
+            if (wheel != nullptr && wheel->HasContact()) {
+                wheelContacts[i] = true;
+                wheelLoadsN[i] = dt > 1e-6f ? std::max(0.0f, wheel->GetSuspensionLambda() / dt) : 0.0f;
+            }
+        }
+        float throttleIn = 0.0f;
+        float brakeIn = v.lastBrake;
+        if (v.lastThrottle >= 0.0f) {
+            throttleIn = v.lastThrottle;
+            if (v.drivetrain.currentGear() < 0 && v.drivetrain.config().powertrain.autoShift && throttleIn > 0.05f) {
+                v.drivetrain.setGear(1);
+            }
+        } else if (forwardSpeedMs > 0.5f) {
+            brakeIn = std::max(brakeIn, -v.lastThrottle);
+        } else {
+            if (v.drivetrain.currentGear() != -1 && v.drivetrain.config().powertrain.autoShift) {
+                v.drivetrain.setGear(-1);
+            }
+            throttleIn = -v.lastThrottle;
+        }
+        const float steerDeg = v.lastSteering * v.drivetrain.config().powertrain.maxSteerDeg;
+        v.lastTelemetry = v.drivetrain.step(throttleIn, brakeIn, v.lastHandbrake, steerDeg, wheelLoadsN,
+                                            wheelContacts, forwardSpeedMs, lateralSpeedMs, dt);
+
         const glm::mat4 parentWorld = [&] {
             JPH::RVec3 position;
             JPH::Quat rotation;

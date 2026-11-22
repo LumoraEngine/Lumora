@@ -17,9 +17,16 @@ add_library(lumora_runtime ${LUMORA_MODULE_TYPE}
     AnimatorStateMachine.cpp
     LuaScript.cpp
     VisualScript.cpp
+    VehicleDynamics.cpp
+    ProceduralIk.cpp
+    ActiveRagdoll.cpp
+    RvoCrowd.cpp
+    SpatialAcoustics.cpp
     net/Socket.cpp
     net/Transport.cpp
-    net/NetSession.cpp)
+    net/NetSession.cpp
+    net/ClientPrediction.cpp
+    net/LagCompensation.cpp)
 # The Lua API prelude is compiled into the module.
 set(lua_prelude_inc ${CMAKE_CURRENT_BINARY_DIR}/generated/LuaPrelude.inc)
 add_custom_command(OUTPUT ${lua_prelude_inc}
