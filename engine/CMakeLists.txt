@@ -20,6 +20,9 @@ lumora_engine_module(core
         core/Uuid.cpp
         core/FileSystem.cpp
         core/JobSystem.cpp
+        core/MemoryAllocators.cpp
+        core/ArchetypeStore.cpp
+        core/FiberJobSystem.cpp
         platform/Paths.cpp
     DEPS Threads::Threads)
 
@@ -32,6 +35,9 @@ lumora_engine_module(assets
         assets/Primitives.cpp
         assets/MeshLod.cpp
         assets/MeshOptimize.cpp
+        assets/Meshlets.cpp
+        assets/MeshCooker.cpp
+        assets/AssetDatabase.cpp
         assets/GltfImporter.cpp
         assets/FbxImporter.cpp
         assets/CgltfImpl.cpp
@@ -61,6 +67,7 @@ lumora_engine_module(scene
         scene/Particles.cpp
         scene/Landscape.cpp
         scene/Timeline.cpp
+        scene/WorldStreaming.cpp
     DEPS lumora_core lumora_assets lumora_input EnTT::EnTT glm::glm nlohmann_json::nlohmann_json)
 
 lumora_engine_module(project
@@ -108,6 +115,9 @@ lumora_engine_module(renderer
         renderer/Overlay.cpp
         renderer/Sprites.cpp
         renderer/VirtualShadowMap.cpp
+        renderer/GpuCulling.cpp
+        renderer/SdfGi.cpp
+        renderer/RestirLighting.cpp
     DEPS lumora_scene Vulkan::Vulkan nvrhi_vk nvrhi)
 
 # The HUD font (DejaVu Sans, Latin subset) compiled into the renderer as a byte array.

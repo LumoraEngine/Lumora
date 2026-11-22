@@ -3,13 +3,12 @@
 #include "assets/MeshOptimize.hpp"
 #include "core/FileSystem.hpp"
 
-#include <meshoptimizer.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace lumora {
@@ -23,7 +22,6 @@ constexpr float kMeshletConeWeight = 0.5f;
 static_assert(sizeof(Vertex) == 56, "Vertex must remain tightly packed for .lmesh serialization");
 static_assert(sizeof(SkinVertex) == 24, "SkinVertex must remain tightly packed for .lmesh serialization");
 static_assert(sizeof(CookedMeshlet) == 60, "CookedMeshlet must remain tightly packed for .lmesh serialization");
-static_assert(sizeof(unsigned int) == sizeof(std::uint32_t), "meshoptimizer index type width mismatch");
 
 struct LmeshHeader {
     char magic[4] = {'L', 'M', 'S', 'H'};
@@ -100,6 +98,17 @@ template <class T>
 
 } // namespace
 
+MeshletData toMeshletData(const CookedMesh& cooked) {
+    MeshletData out;
+    out.meshlets.reserve(cooked.meshlets.size());
+    for (const CookedMeshlet& m : cooked.meshlets) {
+        out.meshlets.push_back(toMeshlet(m));
+    }
+    out.meshletVertices = cooked.meshletVertices;
+    out.meshletTriangles = cooked.meshletTriangles;
+    return out;
+}
+
 CookedMesh cookMesh(const MeshData& source) {
     CookedMesh cooked;
     if (source.vertices.empty() || source.indices.size() < 3 || source.indices.size() % 3 != 0) {
@@ -120,76 +129,19 @@ CookedMesh cookMesh(const MeshData& source) {
 
     cooked.bounds = working.bounds;
     cooked.lods = buildLods(working);
+
+    MeshletData built = buildMeshlets(working, kMaxCookedMeshletVertices, kMaxCookedMeshletTriangles,
+                                      kMeshletConeWeight);
     cooked.vertices = std::move(working.vertices);
     cooked.skin = std::move(working.skin);
     cooked.indices = std::move(working.indices);
 
-    if (cooked.vertices.empty() || cooked.indices.size() < 3) {
-        return cooked;
+    cooked.meshlets.reserve(built.meshlets.size());
+    for (const Meshlet& m : built.meshlets) {
+        cooked.meshlets.push_back(toCookedMeshlet(m));
     }
-
-    const std::size_t maxMeshlets =
-        meshopt_buildMeshletsBound(cooked.indices.size(), kMaxCookedMeshletVertices, kMaxCookedMeshletTriangles);
-    if (maxMeshlets == 0) {
-        return cooked;
-    }
-
-    std::vector<meshopt_Meshlet> rawMeshlets(maxMeshlets);
-    std::vector<unsigned int> rawVertices(maxMeshlets * kMaxCookedMeshletVertices);
-    std::vector<unsigned char> rawTriangles(maxMeshlets * kMaxCookedMeshletTriangles * 3);
-
-    const std::size_t meshletCount = meshopt_buildMeshlets(
-        rawMeshlets.data(),
-        rawVertices.data(),
-        rawTriangles.data(),
-        cooked.indices.data(),
-        cooked.indices.size(),
-        &cooked.vertices[0].position.x,
-        cooked.vertices.size(),
-        sizeof(Vertex),
-        kMaxCookedMeshletVertices,
-        kMaxCookedMeshletTriangles,
-        kMeshletConeWeight);
-
-    if (meshletCount == 0) {
-        return cooked;
-    }
-
-    const meshopt_Meshlet& last = rawMeshlets[meshletCount - 1];
-    rawMeshlets.resize(meshletCount);
-    rawVertices.resize(static_cast<std::size_t>(last.vertex_offset) + last.vertex_count);
-    rawTriangles.resize(static_cast<std::size_t>(last.triangle_offset) + static_cast<std::size_t>(last.triangle_count) * 3);
-
-    cooked.meshlets.reserve(meshletCount);
-    for (const meshopt_Meshlet& m : rawMeshlets) {
-        meshopt_optimizeMeshlet(
-            &rawVertices[m.vertex_offset],
-            &rawTriangles[m.triangle_offset],
-            m.triangle_count,
-            m.vertex_count);
-
-        const meshopt_Bounds bounds = meshopt_computeMeshletBounds(
-            &rawVertices[m.vertex_offset],
-            &rawTriangles[m.triangle_offset],
-            m.triangle_count,
-            &cooked.vertices[0].position.x,
-            cooked.vertices.size(),
-            sizeof(Vertex));
-
-        CookedMeshlet outMeshlet;
-        outMeshlet.vertexOffset = m.vertex_offset;
-        outMeshlet.triangleOffset = m.triangle_offset;
-        outMeshlet.vertexCount = m.vertex_count;
-        outMeshlet.triangleCount = m.triangle_count;
-        outMeshlet.boundingSphere = glm::vec4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius);
-        outMeshlet.coneApex = glm::vec3(bounds.cone_apex[0], bounds.cone_apex[1], bounds.cone_apex[2]);
-        outMeshlet.coneAxis = glm::vec3(bounds.cone_axis[0], bounds.cone_axis[1], bounds.cone_axis[2]);
-        outMeshlet.coneCutoff = bounds.cone_cutoff;
-        cooked.meshlets.push_back(outMeshlet);
-    }
-
-    cooked.meshletVertices.assign(rawVertices.begin(), rawVertices.end());
-    cooked.meshletTriangles.assign(rawTriangles.begin(), rawTriangles.end());
+    cooked.meshletVertices = std::move(built.meshletVertices);
+    cooked.meshletTriangles = std::move(built.meshletTriangles);
     return cooked;
 }
 
