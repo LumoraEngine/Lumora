@@ -232,20 +232,7 @@ void SceneRenderer::addShadowPasses(SceneFrame& f) {
 
     RGImage localAtlas{};
     if (localShadows) {
-        if (!localAtlas_) {
-            nvrhi::TextureDesc desc;
-            desc.width = desc.height = localAtlasSize;
-            desc.format = ctx_.depthFormat();
-            desc.debugName = "LocalShadowAtlas";
-            desc.isRenderTarget = true;
-            desc.setClearValue(nvrhi::Color(1.0f));
-            desc.initialState = nvrhi::ResourceStates::ShaderResource;
-            desc.keepInitialState = true;
-            localAtlas_ = gpu->createTexture(desc);
-            if (!localAtlas_) throw rhi::VulkanError("could not create the local shadow atlas", VK_ERROR_OUT_OF_DEVICE_MEMORY);
-            localAtlasIndex_ = ctx_.bindless().registerTexture(localAtlas_);
-            localTileContents_.fill(0);
-        }
+        ensureLocalShadowAtlas(localAtlasSize);
         localAtlas = graph.importImage("LocalShadowAtlas", {localAtlas_, localAtlasIndex_});
         // Casters per tile: inside the light's range and the tile's frustum; tiles whose light and
         // casters are as they were keep their contents.

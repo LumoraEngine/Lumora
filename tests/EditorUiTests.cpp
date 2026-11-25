@@ -9,9 +9,11 @@
 #include "common/VulkanViewport.hpp"
 #include "editor/EditorContext.hpp"
 #include "editor/EditorWindow.hpp"
+#include "editor/ProfilerPanel.hpp"
 #include "hub/HubWindow.hpp"
 #include "main/Application.hpp"
 #include "project/Project.hpp"
+#include "renderer/Renderer.hpp"
 #include "scene/Scene.hpp"
 #include "scene/SceneSerializer.hpp"
 #include "runtime/Simulation.hpp"
@@ -23,8 +25,10 @@
 #include <QDockWidget>
 #include <QEnterEvent>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QLineEdit>
+#include <QSettings>
 #include <QToolButton>
 #include <QTreeWidget>
 
@@ -1288,4 +1292,105 @@ TEST_F(EditorUiTest, UiEditorBuildsMovesAnchorsAndSavesDocuments) {
     EXPECT_TRUE(panel->removeWidget(QStringLiteral("0/1")));
     EXPECT_EQ(panel->document().root.children[0].children.size(), 1u);
     EXPECT_FALSE(panel->removeWidget(QString()));
+}
+
+TEST_F(EditorUiTest, RenderingTogglesPersistAndProfilerReportsActiveFeatures) {
+    struct SettingsGuard {
+        QList<QPair<QString, QVariant>> saved;
+        explicit SettingsGuard(const QStringList& keys) {
+            QSettings s;
+            for (const QString& k : keys) {
+                if (s.contains(k)) saved.append({k, s.value(k)});
+                else saved.append({k, QVariant()});
+                s.remove(k);
+            }
+            s.sync();
+        }
+        ~SettingsGuard() {
+            QSettings s;
+            for (const auto& [k, v] : saved) {
+                if (v.isValid()) s.setValue(k, v);
+                else s.remove(k);
+            }
+            s.sync();
+        }
+    };
+
+    const QStringList keys = {
+        QStringLiteral("viewport/ssr"),
+        QStringLiteral("viewport/gpuOcclusionCulling"),
+        QStringLiteral("viewport/sdfGi"),
+        QStringLiteral("viewport/restirDi"),
+    };
+    SettingsGuard guard(keys);
+
+    auto findAction = [](const QObject& root, const QString& label) -> QAction* {
+        for (QAction* a : root.findChildren<QAction*>()) {
+            if (a->text() == label) return a;
+        }
+        return nullptr;
+    };
+
+    editor::EditorWindow* editor = openEditor();
+    ASSERT_NE(editor, nullptr);
+
+    QAction* ssrAction = findAction(*editor, QStringLiteral("Screen-Space Reflections (SSR)"));
+    QAction* hizAction = findAction(*editor, QStringLiteral("GPU Occlusion Culling (Hi-Z)"));
+    QAction* sdfAction = findAction(*editor, QStringLiteral("SDF Global Illumination"));
+    QAction* restirAction = findAction(*editor, QStringLiteral("ReSTIR Direct Lighting"));
+    ASSERT_NE(ssrAction, nullptr);
+    ASSERT_NE(hizAction, nullptr);
+    ASSERT_NE(sdfAction, nullptr);
+    ASSERT_NE(restirAction, nullptr);
+
+    EXPECT_TRUE(ssrAction->isChecked());
+    EXPECT_FALSE(hizAction->isChecked());
+    EXPECT_FALSE(sdfAction->isChecked());
+    EXPECT_FALSE(restirAction->isChecked());
+
+    ssrAction->trigger();
+    hizAction->trigger();
+    sdfAction->trigger();
+    restirAction->trigger();
+    processEvents();
+
+    {
+        QSettings s;
+        EXPECT_FALSE(s.value(QStringLiteral("viewport/ssr"), true).toBool());
+        EXPECT_TRUE(s.value(QStringLiteral("viewport/gpuOcclusionCulling"), false).toBool());
+        EXPECT_TRUE(s.value(QStringLiteral("viewport/sdfGi"), false).toBool());
+        EXPECT_TRUE(s.value(QStringLiteral("viewport/restirDi"), false).toBool());
+    }
+
+    auto secondProject = Project::create(dir_.path() / "Second", "Second", ProjectTemplate::Empty);
+    ASSERT_TRUE(secondProject.has_value()) << secondProject.error().message;
+    editor::EditorWindow secondEditor(*context_, std::move(*secondProject));
+    processEvents();
+
+    ASSERT_NE(findAction(secondEditor, QStringLiteral("Screen-Space Reflections (SSR)")), nullptr);
+    EXPECT_FALSE(findAction(secondEditor, QStringLiteral("Screen-Space Reflections (SSR)"))->isChecked());
+    EXPECT_TRUE(findAction(secondEditor, QStringLiteral("GPU Occlusion Culling (Hi-Z)"))->isChecked());
+    EXPECT_TRUE(findAction(secondEditor, QStringLiteral("SDF Global Illumination"))->isChecked());
+    EXPECT_TRUE(findAction(secondEditor, QStringLiteral("ReSTIR Direct Lighting"))->isChecked());
+
+    render::FrameStats fakeStats{};
+    fakeStats.extent = {1280, 720};
+    fakeStats.scene.screenSpaceReflections = true;
+    fakeStats.scene.gpuOcclusionCulling = true;
+    fakeStats.scene.sdfGlobalIllumination = true;
+    fakeStats.scene.restirDirectLighting = true;
+
+    editor::ProfilerPanel profiler(nullptr, [&] { return &fakeStats; });
+    profiler.onFrame(16.6);
+    const bool updated = waitFor([&] {
+        for (QLabel* lbl : profiler.findChildren<QLabel*>()) {
+            const QString txt = lbl->text();
+            if (txt.contains(QStringLiteral("Hi-Z Cull")) && txt.contains(QStringLiteral("SDF GI")) &&
+                txt.contains(QStringLiteral("ReSTIR DI")) && txt.contains(QStringLiteral("SSR"))) {
+                return true;
+            }
+        }
+        return false;
+    }, 2000);
+    EXPECT_TRUE(updated) << "ProfilerPanel must display active AAA rendering features";
 }

@@ -71,104 +71,192 @@ void SceneRenderer::addDepthPasses(SceneFrame& f) {
         return twoSided ? depthPrepassTwoSided_ : depthPrepass_;
     };
 
-    // ---- Depth prepass, then ambient occlusion from it ---------------------------------------
+    // ---- Depth prepass (optionally driven by two-phase Hi-Z GPU occlusion culling) -------------
     const bool parallelPrepass = draws.size() >= settings.parallelRecordingMinDraws;
     const RGImage motion = graph.createImage("Motion", {kMotionFormat, extent.width, extent.height});
-    graph.addRasterPass(
-        "DepthPrepass",
-        [&](PassBuilder& b) {
-            b.writeColor(motion, LoadOp::Clear);  // no motion where nothing is drawn (TAA uses the camera)
-            b.writeDepth(depth, LoadOp::Clear, 0.0f);  // reversed-Z: 0 is the far plane
-            b.recordInParallel(parallelPrepass);
-        },
-        [this, stateFor, prepassPipeline, draws](PassContext& ctx) {  // a copy: runs after build() returns
-            if (draws.empty()) return;
-            ctx.recordParallel(draws.size(), 64, [&](nvrhi::ICommandList* cmd, std::size_t begin, std::size_t end) {
-                nvrhi::GraphicsState state = stateFor(depthPrepass_, ctx);
-                const GpuMesh* mesh = nullptr;
-                std::uint8_t variant = 0xff;
-                for (std::size_t i = begin; i < end; ++i) {
-                    const Draw& d = draws[i];
-                    if (d.mesh != mesh || d.variant != variant) {
-                        variant = d.variant;
-                        mesh = d.mesh;
-                        state.pipeline = prepassPipeline(d);
-                        bindMesh(state, *mesh);
-                        cmd->setGraphicsState(state);
+    GpuOcclusionCuller* culler = f.gpuOcclusionCulling ? ensureGpuCulling() : nullptr;
+    if (culler != nullptr) {
+        std::vector<CullInstance> instances;
+        instances.reserve(draws.size());
+        for (const Draw& d : draws) {
+            CullInstance inst;
+            inst.aabbCenter = d.center;
+            inst.aabbExtents = d.extent;
+            inst.indexCount = d.mesh != nullptr ? d.mesh->indexCount : 0u;
+            inst.firstIndex = 0u;
+            inst.vertexOffset = 0;
+            inst.objectIndex = d.object;
+            if (d.mesh != nullptr && d.mesh->skinned()) {
+                inst.flags = kCullInstanceSkipOcclusion | kCullInstanceSkipFrustum;
+            } else if (d.count > 1u) {
+                inst.flags = kCullInstanceSkipOcclusion;
+            } else {
+                inst.flags = 0u;
+            }
+            inst.reserved = d.count;
+            instances.push_back(inst);
+        }
+
+        const bool sameViewHistory =
+            culler->hizTexture() != nullptr && culler->hizWidth() == extent.width &&
+            culler->hizHeight() == extent.height &&
+            isTemporalHistoryValid(gpuCullingActiveLastFrame_, gpuCullingLastScene_, f.scene,
+                                   gpuCullingPreviousCameraPosition_, f.camera.position,
+                                   gpuCullingPreviousCameraForward_, f.cameraForward);
+
+        CullConfig cullConfig;
+        cullConfig.frustumCulling = settings.frustumCulling;
+        cullConfig.occlusionCulling = true;
+        cullConfig.nearPlane = f.camera.nearPlane;
+        cullConfig.depthBias = 0.0f;
+
+        const auto instanceCount = static_cast<std::uint32_t>(instances.size());
+        const glm::mat4 prevVp = gpuCullingPreviousViewProjection_;
+
+        graph.addPass(
+            "GpuCullPhase1",
+            [&](PassBuilder& b) { b.keepAlways(); },
+            [culler, viewProj = fc.viewProjection, prevVp, cullConfig, sameViewHistory, instanceCount,
+             instances = std::move(instances)](PassContext& ctx) {
+                culler->uploadInstances(ctx.cmd, instances);
+                culler->dispatchPhase1(ctx.cmd, ctx.frameBindings(), viewProj, instanceCount, sameViewHistory,
+                                       cullConfig, sameViewHistory ? &prevVp : nullptr);
+            });
+
+        graph.addRasterPass(
+            "DepthPrepass",
+            [&](PassBuilder& b) {
+                b.writeColor(motion, LoadOp::Clear);
+                b.writeDepth(depth, LoadOp::Clear, 0.0f);
+                b.recordInParallel(parallelPrepass);
+            },
+            [this, stateFor, prepassPipeline, culler, draws](PassContext& ctx) {
+                if (draws.empty()) return;
+                ctx.recordParallel(draws.size(), 64, [&](nvrhi::ICommandList* cmd, std::size_t begin, std::size_t end) {
+                    nvrhi::GraphicsState state = stateFor(depthPrepass_, ctx);
+                    state.indirectParams = culler->phase1SlotIndirectBuffer();
+                    const GpuMesh* mesh = nullptr;
+                    std::uint8_t variant = 0xff;
+                    for (std::size_t i = begin; i < end; ++i) {
+                        const Draw& d = draws[i];
+                        if (d.mesh != mesh || d.variant != variant) {
+                            variant = d.variant;
+                            mesh = d.mesh;
+                            state.pipeline = prepassPipeline(d);
+                            bindMesh(state, *mesh);
+                            cmd->setGraphicsState(state);
+                        }
+                        PushConstants pc;
+                        pc.index0 = d.object;
+                        push(cmd, pc);
+                        cmd->drawIndexedIndirect(static_cast<std::uint32_t>(i * sizeof(DrawIndexedIndirectCommand)), 1u);
                     }
-                    PushConstants pc;
-                    pc.index0 = d.object;
-                    push(cmd, pc);
-                    cmd->drawIndexed(nvrhi::DrawArguments().setVertexCount(mesh->indexCount).setInstanceCount(d.count));
+                });
+            });
+
+        graph.addPass(
+            "GpuCullPhase2",
+            [&](PassBuilder& b) {
+                b.sample(depth);
+                b.keepAlways();
+            },
+            [culler, depth, extent, viewProj = fc.viewProjection, cullConfig, sameViewHistory,
+             instanceCount](PassContext& ctx) {
+                culler->buildHiZ(ctx.cmd, ctx.frameBindings(), ctx.texture(depth), ctx.bindlessIndex(depth),
+                                 extent.width, extent.height);
+                if (sameViewHistory) {
+                    culler->dispatchPhase2(ctx.cmd, ctx.frameBindings(), viewProj, instanceCount, cullConfig);
                 }
             });
-        });
 
-    // Optional two-phase Hi-Z GPU occlusion culling after DepthPrepass.
-    if (f.gpuOcclusionCulling) {
-        if (GpuOcclusionCuller* culler = ensureGpuCulling()) {
-            std::vector<CullInstance> instances;
-            instances.reserve(draws.size());
-            for (const Draw& d : draws) {
-                CullInstance inst;
-                inst.aabbCenter = d.center;
-                inst.aabbExtents = d.extent;
-                inst.indexCount = d.mesh != nullptr ? d.mesh->indexCount : 0u;
-                inst.firstIndex = 0u;
-                inst.vertexOffset = 0;
-                inst.objectIndex = d.object;
-                inst.flags = ((d.mesh != nullptr && d.mesh->skinned()) || d.count > 1u)
-                                 ? kCullInstanceSkipOcclusion
-                                 : 0u;
-                instances.push_back(inst);
-            }
-
-            const bool sameViewHistory =
-                culler->hizTexture() != nullptr && culler->hizWidth() == extent.width &&
-                culler->hizHeight() == extent.height &&
-                isTemporalHistoryValid(gpuCullingActiveLastFrame_, gpuCullingLastScene_, f.scene,
-                                       gpuCullingPreviousCameraPosition_, f.camera.position,
-                                       gpuCullingPreviousCameraForward_, f.cameraForward);
-
-            CullConfig cullConfig;
-            cullConfig.frustumCulling = settings.frustumCulling;
-            cullConfig.occlusionCulling = true;
-            cullConfig.nearPlane = f.camera.nearPlane;
-            cullConfig.depthBias = 0.0f;
+        if (sameViewHistory) {
+            graph.addRasterPass(
+                "DepthPrepassPhase2",
+                [&](PassBuilder& b) {
+                    b.writeColor(motion, LoadOp::Load);
+                    b.writeDepth(depth, LoadOp::Load);
+                    b.recordInParallel(parallelPrepass);
+                },
+                [this, stateFor, prepassPipeline, culler, draws](PassContext& ctx) {
+                    if (draws.empty()) return;
+                    ctx.recordParallel(draws.size(), 64, [&](nvrhi::ICommandList* cmd, std::size_t begin, std::size_t end) {
+                        nvrhi::GraphicsState state = stateFor(depthPrepass_, ctx);
+                        state.indirectParams = culler->phase2SlotIndirectBuffer();
+                        const GpuMesh* mesh = nullptr;
+                        std::uint8_t variant = 0xff;
+                        for (std::size_t i = begin; i < end; ++i) {
+                            const Draw& d = draws[i];
+                            if (d.mesh != mesh || d.variant != variant) {
+                                variant = d.variant;
+                                mesh = d.mesh;
+                                state.pipeline = prepassPipeline(d);
+                                bindMesh(state, *mesh);
+                                cmd->setGraphicsState(state);
+                            }
+                            PushConstants pc;
+                            pc.index0 = d.object;
+                            push(cmd, pc);
+                            cmd->drawIndexedIndirect(static_cast<std::uint32_t>(i * sizeof(DrawIndexedIndirectCommand)), 1u);
+                        }
+                    });
+                });
 
             graph.addPass(
-                "GpuOcclusionCull",
+                "HiZBuildFinal",
                 [&](PassBuilder& b) {
                     b.sample(depth);
                     b.keepAlways();
                 },
-                [culler, depth, extent, viewProj = fc.viewProjection, cullConfig, sameViewHistory,
-                 instances = std::move(instances)](PassContext& ctx) {
-                    culler->uploadInstances(ctx.cmd, instances);
-                    const auto instanceCount = static_cast<std::uint32_t>(instances.size());
-                    culler->dispatchPhase1(ctx.cmd, ctx.frameBindings(), viewProj, instanceCount, sameViewHistory,
-                                           cullConfig);
+                [culler, depth, extent](PassContext& ctx) {
                     culler->buildHiZ(ctx.cmd, ctx.frameBindings(), ctx.texture(depth), ctx.bindlessIndex(depth),
                                      extent.width, extent.height);
-                    culler->dispatchPhase2(ctx.cmd, ctx.frameBindings(), viewProj, instanceCount, cullConfig);
                 });
-
-            gpuCullingActiveLastFrame_ = true;
-            gpuCullingLastScene_ = &f.scene;
-            gpuCullingPreviousCameraPosition_ = f.camera.position;
-            gpuCullingPreviousCameraForward_ = f.cameraForward;
-            stats.gpuOcclusionCulling = true;
-        } else {
-            gpuCullingActiveLastFrame_ = false;
         }
+
+        gpuCullingActiveLastFrame_ = true;
+        gpuCullingLastScene_ = &f.scene;
+        gpuCullingPreviousCameraPosition_ = f.camera.position;
+        gpuCullingPreviousCameraForward_ = f.cameraForward;
+        gpuCullingPreviousViewProjection_ = fc.viewProjection;
+        stats.gpuOcclusionCulling = true;
     } else {
         gpuCullingActiveLastFrame_ = false;
+        f.gpuOcclusionCulling = false;
+        graph.addRasterPass(
+            "DepthPrepass",
+            [&](PassBuilder& b) {
+                b.writeColor(motion, LoadOp::Clear);  // no motion where nothing is drawn (TAA uses the camera)
+                b.writeDepth(depth, LoadOp::Clear, 0.0f);  // reversed-Z: 0 is the far plane
+                b.recordInParallel(parallelPrepass);
+            },
+            [this, stateFor, prepassPipeline, draws](PassContext& ctx) {  // a copy: runs after build() returns
+                if (draws.empty()) return;
+                ctx.recordParallel(draws.size(), 64, [&](nvrhi::ICommandList* cmd, std::size_t begin, std::size_t end) {
+                    nvrhi::GraphicsState state = stateFor(depthPrepass_, ctx);
+                    const GpuMesh* mesh = nullptr;
+                    std::uint8_t variant = 0xff;
+                    for (std::size_t i = begin; i < end; ++i) {
+                        const Draw& d = draws[i];
+                        if (d.mesh != mesh || d.variant != variant) {
+                            variant = d.variant;
+                            mesh = d.mesh;
+                            state.pipeline = prepassPipeline(d);
+                            bindMesh(state, *mesh);
+                            cmd->setGraphicsState(state);
+                        }
+                        PushConstants pc;
+                        pc.index0 = d.object;
+                        push(cmd, pc);
+                        cmd->drawIndexed(nvrhi::DrawArguments().setVertexCount(mesh->indexCount).setInstanceCount(d.count));
+                    }
+                });
+            });
     }
 
     // Optional SDF scene ray-traced global illumination after DepthPrepass.
     if (f.sdfGlobalIllumination) {
         if (SdfGiPass* sdfGiPass = ensureSdfGi()) {
-            ensureSdfGiVolume(f.scene);
+            ensureSdfGiVolume(f.scene, f.env, settings.assets);
             ensureSdfGiOutput(extent.width, extent.height);
             const RGImage giOut = graph.importImage("SdfGiIrradiance", {sdfGiOutput_, sdfGiOutputIndex_});
             const std::uint32_t giFrame =
@@ -378,7 +466,11 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
     const std::vector<std::uint32_t>& waters = f.waters;
     const GpuMesh* waterGrid = f.waterGrid;
     const std::vector<Draw>& transparents = f.transparents;
-    auto opaquePipeline = [this, writeSurfaceBuffers](const Draw& d) -> nvrhi::IGraphicsPipeline* {
+    auto opaquePipeline = [this, writeSurfaceBuffers, restir](const Draw& d) -> nvrhi::IGraphicsPipeline* {
+        if (restir) {
+            if (d.mesh->skinned()) return opaqueRestirSkinned_;
+            return (d.variant & kTwoSided) != 0 ? opaqueRestirTwoSided_ : opaqueRestir_;
+        }
         if (writeSurfaceBuffers) {
             if (d.mesh->skinned()) return opaqueReflectionsSkinned_;
             return (d.variant & kTwoSided) != 0 ? opaqueReflectionsTwoSided_ : opaqueReflections_;
@@ -389,11 +481,16 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
 
     const bool parallelOpaque = draws.size() >= settings.parallelRecordingMinDraws;
     stats.parallelRecording = stats.parallelRecording || parallelOpaque;
-    RGImage surfaceNormal{}, surfaceSpecular{};
+    RGImage surfaceNormal{}, surfaceSpecular{}, surfaceAlbedo{};
     if (writeSurfaceBuffers) {
         surfaceNormal = graph.createImage("SurfaceNormalRoughness", {kSurfaceFormat, extent.width, extent.height});
         surfaceSpecular = graph.createImage("SurfaceSpecular", {kSurfaceFormat, extent.width, extent.height});
     }
+    if (restir) {
+        surfaceAlbedo = graph.createImage("SurfaceAlbedoMetallic", {kSurfaceFormat, extent.width, extent.height});
+    }
+    const bool sdfGiValid = f.sdfGi.valid();
+    const GpuOcclusionCuller* cullerForOpaque = f.gpuOcclusionCulling ? gpuCulling_.get() : nullptr;
     graph.addRasterPass(
         "Opaque",
         [&](PassBuilder& b) {
@@ -401,6 +498,9 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
             if (writeSurfaceBuffers) {
                 b.writeColor(surfaceNormal, LoadOp::Clear);
                 b.writeColor(surfaceSpecular, LoadOp::Clear);
+            }
+            if (restir) {
+                b.writeColor(surfaceAlbedo, LoadOp::Clear);
             }
             b.readDepth(depth);  // from the prepass; the opaque pass only tests against it
             if (shadows && !virtualShadows) b.sample(shadowMap);
@@ -412,10 +512,11 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
             if (ambientOcclusion) b.sample(ao);
             if (fogVolume.valid()) b.sample(fogVolume);
             if (contact.valid()) b.sample(contact);
+            if (sdfGiValid) b.sample(f.sdfGi);
             b.recordInParallel(parallelOpaque);
         },
         [this, stateFor, opaquePipeline, shadows, shadowMap, virtualShadows, vsmPool, vsmPageTable, localShadows, localAtlas, ambientOcclusion, ao,
-         fogVolume, contact, debugCascades = settings.debugCascades,
+         fogVolume, contact, sdfGiValid, restir, cullerForOpaque, debugCascades = settings.debugCascades,
          draws = std::move(draws)](PassContext& ctx) {
             if (draws.empty()) return;
             const std::uint32_t shadowIndex = virtualShadows ? ctx.bindlessIndex(vsmPool) : shadows ? ctx.bindlessIndex(shadowMap) : 0u;
@@ -425,10 +526,11 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
             const float fogIndex = std::bit_cast<float>(fogVolume.valid() ? ctx.bindlessIndex(fogVolume) : 0u);
             const float contactIndex = std::bit_cast<float>(contact.valid() ? ctx.bindlessIndex(contact) : 0u);
             const std::uint32_t flags = (shadows ? 1u : 0u) | (shadows && debugCascades ? 2u : 0u) | (ambientOcclusion ? 4u : 0u) |
-                                        (contact.valid() ? 8u : 0u);
+                                        (contact.valid() ? 8u : 0u) | (restir ? 32u : 0u) | (sdfGiValid ? 64u : 0u);
             // Draws are sorted by mesh, so each chunk rebinds buffers only where meshes change.
             ctx.recordParallel(draws.size(), 64, [&](nvrhi::ICommandList* cmd, std::size_t begin, std::size_t end) {
                 nvrhi::GraphicsState state = stateFor(opaque_, ctx);
+                if (cullerForOpaque != nullptr) state.indirectParams = cullerForOpaque->finalSlotIndirectBuffer();
                 const GpuMesh* mesh = nullptr;
                 std::uint8_t variant = 0xff;
                 for (std::size_t i = begin; i < end; ++i) {
@@ -450,7 +552,11 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
                     pc.param2 = fogIndex;
                     pc.param3 = contactIndex;
                     push(cmd, pc);
-                    cmd->drawIndexed(nvrhi::DrawArguments().setVertexCount(mesh->indexCount).setInstanceCount(d.count));
+                    if (cullerForOpaque != nullptr) {
+                        cmd->drawIndexedIndirect(static_cast<std::uint32_t>(i * sizeof(DrawIndexedIndirectCommand)), 1u);
+                    } else {
+                        cmd->drawIndexed(nvrhi::DrawArguments().setVertexCount(mesh->indexCount).setInstanceCount(d.count));
+                    }
                 }
             });
         });
@@ -467,10 +573,46 @@ void SceneRenderer::addSurfacePasses(SceneFrame& f) {
         restirInputs.depth = depth;
         restirInputs.motion = f.motion;
         restirInputs.normalRoughness = surfaceNormal;
-        restirInputs.outputHdr = graph.importImage("RestirDirectLighting", {restirPass->hdrOutput()});
+        restirInputs.albedo = surfaceAlbedo;
+        restirInputs.localShadowAtlas = localAtlas;
+        restirInputs.outputHdr =
+            graph.importImage("RestirDirectLighting", {restirPass->hdrOutput(), restirPass->hdrOutputBindless()});
         restirInputs.usePreviousViewProjection = true;
         restirInputs.resetHistory = resetHistory;
         f.restirHdr = restirPass->addPasses(graph, restirInputs);
+
+        if (f.restirHdr.valid() && restirComposite_) {
+            const RGImage composited =
+                graph.createImage("SceneColorRestir", {ctx_.hdrFormat(), extent.width, extent.height, true});
+            nvrhi::IDescriptorTable* bindlessTable = ctx_.bindless().table();
+            const bool haveFogVolume = fogVolume.valid();
+            graph.addComputePass(
+                "RestirComposite",
+                [&](PassBuilder& b) {
+                    b.writeStorage(composited);
+                    b.sample(hdr);
+                    b.sample(f.restirHdr);
+                    b.sample(depth);
+                    if (haveFogVolume) b.sample(fogVolume);
+                },
+                [this, hdr, restirHdr = f.restirHdr, depth, fogVolume, haveFogVolume, bindlessTable, extent](
+                    PassContext& ctx) {
+                    ctx.cmd->setComputeState(nvrhi::ComputeState()
+                                                 .setPipeline(restirComposite_)
+                                                 .addBindingSet(ctx.frameBindings())
+                                                 .addBindingSet(bindlessTable)
+                                                 .addBindingSet(ctx.storageBindings()));
+                    PushConstants pc;
+                    pc.index0 = ctx.bindlessIndex(hdr);
+                    pc.index1 = ctx.bindlessIndex(restirHdr);
+                    pc.index2 = ctx.bindlessIndex(depth);
+                    pc.flags = haveFogVolume ? 1u : 0u;
+                    pc.param2 = std::bit_cast<float>(haveFogVolume ? ctx.bindlessIndex(fogVolume) : 0u);
+                    push(ctx.cmd, pc);
+                    ctx.cmd->dispatch((extent.width + 7) / 8, (extent.height + 7) / 8, 1);
+                });
+            hdr = composited;
+        }
 
         restirActiveLastFrame_ = true;
         restirLastScene_ = &f.scene;

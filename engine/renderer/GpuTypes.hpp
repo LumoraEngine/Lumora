@@ -75,7 +75,7 @@ struct FrameConstants {
     glm::vec4 irradianceSh[9]{};            // SH9 irradiance / pi (rgb)
     glm::uvec4 lightGrid{0u};               // x tiles across, y tiles down, z tile size (px), w point lights
     glm::mat4 localShadowMatrices[kLocalShadowTiles]{};  // spot / point-face view-projections (atlas tiles)
-    glm::vec4 localShadowParams{0.0f};      // x enabled, y 1/atlas size (texels), z tiles per side
+    glm::vec4 localShadowParams{0.0f};      // x enabled, y 1/atlas size (texels), z tiles per side, w asfloat(atlas bindless index)
     glm::vec4 grading{1.0f, 1.0f, 0.0f, 0.0f};  // x contrast, y saturation, z temperature, w tint
     glm::vec4 depthOfField{0.0f};           // x focus distance, y focus range, z max blur (px), w near plane
     glm::vec4 sunShafts{0.0f};              // xy sun on screen (uv), z intensity, w visibility
@@ -86,7 +86,7 @@ struct FrameConstants {
     glm::vec4 jitter{0.0f};                 // xy this frame's sub-pixel offset (NDC), zw last frame's
     glm::uvec4 probeCount{0u};              // x reflection probes in `probes`
     GpuReflectionProbe probes[kMaxReflectionProbes]{};
-    glm::uvec4 volumeCount{0u};             // x light probe volumes in `volumes`
+    glm::uvec4 volumeCount{0u};             // x light probe volumes in `volumes`, y SDF GI irradiance (bindless), z SDF GI active (1/0)
     GpuProbeVolume volumes[kMaxProbeVolumes]{};
     glm::uvec4 fogVolume{0u};               // x 1 = volumetric fog, yzw froxels along x, y, z
     glm::vec4 fogVolumeParams{0.0f};        // x distance it reaches (m), y anisotropy, z depth jitter (0..1)

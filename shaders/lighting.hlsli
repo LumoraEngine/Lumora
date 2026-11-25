@@ -244,7 +244,9 @@ float3 environmentSpecular(float3 position, float3 normal, float3 view, float ro
 /// Ambient light from the environment: irradiance around the normal, specular from the
 /// reflection's dominant direction. `specularWeight` is what multiplies the environment's
 /// specular radiance (Fresnel, the split-sum BRDF, energy compensation, horizon occlusion).
-float3 evaluateAmbient(Surface s, out float3 specularWeight) {
+/// When `hasSdfGi` is true, `sdfDiffuseIrradianceOverPi` replaces the sky diffuse irradiance
+/// in final radiance units (not scaled again by ambient intensity).
+float3 evaluateAmbient(Surface s, out float3 specularWeight, bool hasSdfGi, float3 sdfDiffuseIrradianceOverPi) {
     float NdotV = max(dot(s.normal, s.view), 1e-4);
     float3 F0 = lerp(s.specularF0, s.albedo, s.metallic);
     float3 F = fresnelSchlickRoughness(NdotV, F0, s.roughness);
@@ -265,16 +267,24 @@ float3 evaluateAmbient(Surface s, out float3 specularWeight) {
 #if defined(LUMORA_STAGE_FRAG)
     // Baked indirect light inside light probe volumes (final radiance: undo the ambient intensity).
     float4 baked = probeVolumeIrradiance(s.position, s.normal);
-    diffuseLight = lerp(diffuseLight, baked.rgb / max(gFrame.skyZenith.w, 1e-3), baked.a);
+    if (hasSdfGi) {
+        diffuseLight = lerp(sdfDiffuseIrradianceOverPi, baked.rgb, baked.a);
+    } else {
+        diffuseLight = lerp(diffuseLight, baked.rgb / max(gFrame.skyZenith.w, 1e-3), baked.a);
+    }
 #endif
     float3 envSpecular = environmentSpecular(s.position, s.normal, s.view, s.roughness);
     float3 diffuse = (1.0 - F) * (1.0 - s.metallic) * (1.0 - s.transmission) * s.albedo * diffuseLight;
+    if (!hasSdfGi) {
+        diffuse *= gFrame.skyZenith.w;
+    }
     specularWeight = (F0 * envBrdf.x + envBrdf.y) * energyCompensation(envBrdf, F0) * horizonOcclusion(R, s.geometricNormal);
-    float3 result = diffuse + envSpecular * specularWeight;
+    float3 result = diffuse + envSpecular * specularWeight * gFrame.skyZenith.w;
     if (maxComponent(s.sheenColor) > 0.0) {
         float E = sheenAlbedo(NdotV, s.sheenRoughness);
         float keep = 1.0 - maxComponent(s.sheenColor) * E;
-        result = result * keep + s.sheenColor * diffuseLight * E;
+        float3 sheenDiffuse = hasSdfGi ? diffuseLight : (diffuseLight * gFrame.skyZenith.w);
+        result = result * keep + s.sheenColor * sheenDiffuse * E;
         specularWeight *= keep;
     }
     if (s.clearcoat > 0.0) {
@@ -282,16 +292,21 @@ float3 evaluateAmbient(Surface s, out float3 specularWeight) {
         float roughnessC = max(s.clearcoatRoughness, 0.02);
         float Fc = fresnelSchlickRoughness(NdotVc, 0.04.xxx, roughnessC).x * s.clearcoat;
         float2 brdfC = environmentBrdf(NdotVc, roughnessC);
-        float3 coat = environmentSpecular(s.position, s.clearcoatNormal, s.view, roughnessC) * (0.04 * brdfC.x + brdfC.y) * s.clearcoat;
+        float3 coat = environmentSpecular(s.position, s.clearcoatNormal, s.view, roughnessC) *
+                      (0.04 * brdfC.x + brdfC.y) * s.clearcoat * gFrame.skyZenith.w;
         result = result * (1.0 - Fc) + coat;
         specularWeight *= 1.0 - Fc;  // what screen-space reflections replace: the base's lobe
     }
-    return result * gFrame.skyZenith.w;
+    return result;
+}
+
+float3 evaluateAmbient(Surface s, out float3 specularWeight) {
+    return evaluateAmbient(s, specularWeight, false, 0.0.xxx);
 }
 
 float3 evaluateAmbient(Surface s) {
     float3 specularWeight;
-    return evaluateAmbient(s, specularWeight);
+    return evaluateAmbient(s, specularWeight, false, 0.0.xxx);
 }
 
 #endif

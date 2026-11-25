@@ -148,7 +148,9 @@ namespace {
                                                            nvrhi::IBuffer* instanceBuffer,
                                                            nvrhi::IBuffer* indirectBuffer,
                                                            nvrhi::IBuffer* visibilityBuffer,
-                                                           nvrhi::IBuffer* countBuffer) {
+                                                           nvrhi::IBuffer* countBuffer,
+                                                           nvrhi::IBuffer* slotIndirectBuffer,
+                                                           nvrhi::IBuffer* finalSlotIndirectBuffer) {
     nvrhi::BindingSetDesc desc;
     desc.bindings = {
         nvrhi::BindingSetItem::ConstantBuffer(0, constantsBuffer),
@@ -156,6 +158,8 @@ namespace {
         nvrhi::BindingSetItem::StructuredBuffer_UAV(2, indirectBuffer),
         nvrhi::BindingSetItem::StructuredBuffer_UAV(3, visibilityBuffer),
         nvrhi::BindingSetItem::StructuredBuffer_UAV(4, countBuffer),
+        nvrhi::BindingSetItem::StructuredBuffer_UAV(5, slotIndirectBuffer),
+        nvrhi::BindingSetItem::StructuredBuffer_UAV(6, finalSlotIndirectBuffer),
     };
     nvrhi::BindingSetHandle set = gpu->createBindingSet(desc, layout);
     if (!set) {
@@ -213,9 +217,10 @@ CullConstants makeCullConstants(const glm::mat4& viewProjection,
                                 std::uint32_t hizTextureIndex,
                                 std::uint32_t hizSamplerIndex,
                                 const CullConfig& config,
-                                bool hizValid) noexcept {
+                                bool hizValid,
+                                const glm::mat4* hizViewProjection) noexcept {
     CullConstants c;
-    c.viewProjection = viewProjection;
+    c.viewProjection = hizViewProjection != nullptr ? *hizViewProjection : viewProjection;
     const auto planes = extractReversedZFrustumPlanes(viewProjection);
     for (std::size_t i = 0; i < 6; ++i) {
         c.frustumPlanes[i] = planes[i];
@@ -314,7 +319,8 @@ CpuCullResult cullInstancesPhase1Cpu(std::span<const CullInstance> instances,
 
     for (std::size_t i = 0; i < instances.size(); ++i) {
         const CullInstance& inst = instances[i];
-        if (doFrustum && !intersectsReversedZFrustum(planes, inst.aabbCenter, inst.aabbExtents)) {
+        if (doFrustum && (inst.flags & kCullInstanceSkipFrustum) == 0u &&
+            !intersectsReversedZFrustum(planes, inst.aabbCenter, inst.aabbExtents)) {
             result.visibility[i] = kCullVisibilityCulled;
             continue;
         }
@@ -344,7 +350,8 @@ std::vector<DrawIndexedIndirectCommand> cullInstancesPhase2Cpu(
             continue;
         }
         const CullInstance& inst = instances[i];
-        if (doFrustum && !intersectsReversedZFrustum(planes, inst.aabbCenter, inst.aabbExtents)) {
+        if (doFrustum && (inst.flags & kCullInstanceSkipFrustum) == 0u &&
+            !intersectsReversedZFrustum(planes, inst.aabbCenter, inst.aabbExtents)) {
             visibility[i] = kCullVisibilityCulled;
             continue;
         }
@@ -377,6 +384,8 @@ GpuOcclusionCuller::GpuOcclusionCuller(RenderContext& ctx) : ctx_(ctx) {
         nvrhi::BindingLayoutItem::StructuredBuffer_UAV(2),
         nvrhi::BindingLayoutItem::StructuredBuffer_UAV(3),
         nvrhi::BindingLayoutItem::StructuredBuffer_UAV(4),
+        nvrhi::BindingLayoutItem::StructuredBuffer_UAV(5),
+        nvrhi::BindingLayoutItem::StructuredBuffer_UAV(6),
     };
     cullLayout_ = gpu->createBindingLayout(cullLayoutDesc);
     if (!cullLayout_) {
@@ -490,6 +499,18 @@ void GpuOcclusionCuller::ensureInstanceBuffers(std::uint32_t maxInstances) {
         gpu, static_cast<std::uint64_t>(newCapacity) * sizeof(DrawIndexedIndirectCommand),
         sizeof(DrawIndexedIndirectCommand), false, true, true,
         nvrhi::ResourceStates::IndirectArgument, "GpuCullPhase2Indirect");
+    phase1SlotIndirectBuffer_ = createGpuBuffer(
+        gpu, static_cast<std::uint64_t>(newCapacity) * sizeof(DrawIndexedIndirectCommand),
+        sizeof(DrawIndexedIndirectCommand), false, true, true,
+        nvrhi::ResourceStates::IndirectArgument, "GpuCullPhase1SlotIndirect");
+    phase2SlotIndirectBuffer_ = createGpuBuffer(
+        gpu, static_cast<std::uint64_t>(newCapacity) * sizeof(DrawIndexedIndirectCommand),
+        sizeof(DrawIndexedIndirectCommand), false, true, true,
+        nvrhi::ResourceStates::IndirectArgument, "GpuCullPhase2SlotIndirect");
+    finalSlotIndirectBuffer_ = createGpuBuffer(
+        gpu, static_cast<std::uint64_t>(newCapacity) * sizeof(DrawIndexedIndirectCommand),
+        sizeof(DrawIndexedIndirectCommand), false, true, true,
+        nvrhi::ResourceStates::IndirectArgument, "GpuCullFinalSlotIndirect");
 
     if (!phase1CountBuffer_) {
         phase1CountBuffer_ = createGpuBuffer(
@@ -514,10 +535,12 @@ void GpuOcclusionCuller::ensureInstanceBuffers(std::uint32_t maxInstances) {
 
     phase1CullSet_ = createCullBindingSet(
         gpu, cullLayout_, phase1ConstantsBuffer_, instanceBuffer_,
-        phase1IndirectBuffer_, visibilityBuffer_, phase1CountBuffer_);
+        phase1IndirectBuffer_, visibilityBuffer_, phase1CountBuffer_,
+        phase1SlotIndirectBuffer_, finalSlotIndirectBuffer_);
     phase2CullSet_ = createCullBindingSet(
         gpu, cullLayout_, phase2ConstantsBuffer_, instanceBuffer_,
-        phase2IndirectBuffer_, visibilityBuffer_, phase2CountBuffer_);
+        phase2IndirectBuffer_, visibilityBuffer_, phase2CountBuffer_,
+        phase2SlotIndirectBuffer_, finalSlotIndirectBuffer_);
 
     instanceCapacity_ = newCapacity;
 }
@@ -604,7 +627,8 @@ void GpuOcclusionCuller::dispatchCullPass(nvrhi::ICommandList* cmd,
                                           const glm::mat4& viewProjection,
                                           std::uint32_t instanceCount,
                                           bool hizValid,
-                                          const CullConfig& config) {
+                                          const CullConfig& config,
+                                          const glm::mat4* hizViewProjection) {
     cmd->clearBufferUInt(countBuffer, 0u);
     if (instanceCount == 0u) {
         return;
@@ -612,7 +636,8 @@ void GpuOcclusionCuller::dispatchCullPass(nvrhi::ICommandList* cmd,
 
     const CullConstants constants = makeCullConstants(
         viewProjection, hizWidth_, hizHeight_, hizMipCount_, instanceCount,
-        hizBindlessIndex_, ctx_.linearClampSampler(), config, hizValid && hizTexture_ != nullptr);
+        hizBindlessIndex_, ctx_.linearClampSampler(), config, hizValid && hizTexture_ != nullptr,
+        hizViewProjection);
     cmd->writeBuffer(constantsBuffer, &constants, sizeof(constants));
 
     if (hizValid && hizTexture_) {
@@ -634,10 +659,15 @@ void GpuOcclusionCuller::dispatchPhase1(nvrhi::ICommandList* cmd,
                                         const glm::mat4& viewProjection,
                                         std::uint32_t instanceCount,
                                         bool hizValid,
-                                        const CullConfig& config) {
+                                        const CullConfig& config,
+                                        const glm::mat4* hizViewProjection) {
     ensureInstanceBuffers(std::max(instanceCount, 1u));
     dispatchCullPass(cmd, cullPhase1Pipeline_, phase1ConstantsBuffer_, phase1CountBuffer_,
-                     phase1CullSet_, frameBindings, viewProjection, instanceCount, hizValid, config);
+                     phase1CullSet_, frameBindings, viewProjection, instanceCount, hizValid, config,
+                     hizViewProjection);
+    cmd->setBufferState(phase1SlotIndirectBuffer_, nvrhi::ResourceStates::IndirectArgument);
+    cmd->setBufferState(finalSlotIndirectBuffer_, nvrhi::ResourceStates::IndirectArgument);
+    cmd->commitBarriers();
 }
 
 void GpuOcclusionCuller::dispatchPhase2(nvrhi::ICommandList* cmd,
@@ -648,7 +678,10 @@ void GpuOcclusionCuller::dispatchPhase2(nvrhi::ICommandList* cmd,
     ensureInstanceBuffers(std::max(instanceCount, 1u));
     dispatchCullPass(cmd, cullPhase2Pipeline_, phase2ConstantsBuffer_, phase2CountBuffer_,
                      phase2CullSet_, frameBindings, viewProjection, instanceCount,
-                     hizTexture_ != nullptr, config);
+                     hizTexture_ != nullptr, config, nullptr);
+    cmd->setBufferState(phase2SlotIndirectBuffer_, nvrhi::ResourceStates::IndirectArgument);
+    cmd->setBufferState(finalSlotIndirectBuffer_, nvrhi::ResourceStates::IndirectArgument);
+    cmd->commitBarriers();
 }
 
 } // namespace lumora::render

@@ -47,6 +47,10 @@ public:
     bool showGrid = true;
     float renderScale = 1.0f;  // TAA upscaling: the scene renders at this fraction of the viewport (View > Resolution)
     bool showIcons = true;              // floating light / camera / sound icons while editing
+    bool screenSpaceReflections = true;
+    bool gpuOcclusionCulling = false;
+    bool sdfGlobalIllumination = false;
+    bool restirDirectLighting = false;
     glm::vec2 viewportPixels{0.0f};     // the viewport's size in target pixels (set by the window)
     float pixelRatio = 1.0f;            // target pixels per window pixel
     AssetLibrary* assets = nullptr;  // project asset library (meshes for rendering and picking)

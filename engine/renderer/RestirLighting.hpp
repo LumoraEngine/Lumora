@@ -72,6 +72,7 @@ struct RestirGraphInputs {
     RGImage albedo{};
     RGImage prevDepth{};
     RGImage prevNormal{};
+    RGImage localShadowAtlas{};
     RGImage outputHdr{};  // optional target; created as a transient RGBA16_FLOAT storage image if invalid
     bool usePreviousViewProjection = true;
     bool resetHistory = false;
@@ -175,6 +176,7 @@ public:
         return reservoirs_[idx];
     }
     [[nodiscard]] nvrhi::ITexture* hdrOutput() const noexcept { return hdrOutput_; }
+    [[nodiscard]] std::uint32_t hdrOutputBindless() const noexcept { return hdrOutputBindless_; }
     [[nodiscard]] std::uint32_t width() const noexcept { return width_; }
     [[nodiscard]] std::uint32_t height() const noexcept { return height_; }
     [[nodiscard]] std::uint64_t frameIndex() const noexcept { return frameIndex_; }

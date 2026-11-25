@@ -10,6 +10,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QProgressBar>
+#include <QStringList>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -142,8 +143,18 @@ void ProfilerPanel::refresh() {
     cpu_->setText(QStringLiteral("%1 ms").arg(s->cpuRecordMs, 0, 'f', 3));
     gpu_->setText(s->gpuFrameMs > 0.0 ? QStringLiteral("%1 ms").arg(s->gpuFrameMs, 0, 'f', 3) : tr("n/a"));
     constexpr double kMiB = 1024.0 * 1024.0;
+    QStringList activeFeatures;
+    if (s->scene.temporalAntiAliasing) activeFeatures << QStringLiteral("TAA");
+    if (s->scene.screenSpaceReflections) activeFeatures << QStringLiteral("SSR");
+    if (s->scene.virtualShadows) activeFeatures << QStringLiteral("VSM");
+    if (s->scene.gpuOcclusionCulling) activeFeatures << QStringLiteral("Hi-Z Cull");
+    if (s->scene.sdfGlobalIllumination) activeFeatures << QStringLiteral("SDF GI");
+    if (s->scene.restirDirectLighting) activeFeatures << QStringLiteral("ReSTIR DI");
+    if (s->scene.volumetricFog) activeFeatures << QStringLiteral("VolFog");
+    if (s->scene.ambientOcclusion) activeFeatures << QStringLiteral("GTAO");
     scene_->setText(tr("%1 draws · %2 tris · %3 visible · %4 culled · %5 lights · %6×%7\n"
-                       "%8 passes (%9 culled) · %10 images in %11 textures · %12 MiB (%13 MiB unshared, %14 MiB pooled)")
+                       "%8 passes (%9 culled) · %10 images in %11 textures · %12 MiB (%13 MiB unshared, %14 MiB pooled)\n"
+                       "Active: %15")
                         .arg(s->scene.drawCalls)
                         .arg(s->scene.triangles)
                         .arg(s->scene.visibleObjects)
@@ -157,7 +168,8 @@ void ProfilerPanel::refresh() {
                         .arg(s->transients.textures)
                         .arg(static_cast<double>(s->transients.bytes) / kMiB, 0, 'f', 1)
                         .arg(static_cast<double>(s->transients.unsharedBytes) / kMiB, 0, 'f', 1)
-                        .arg(static_cast<double>(s->transientPoolBytes) / kMiB, 0, 'f', 1));
+                        .arg(static_cast<double>(s->transientPoolBytes) / kMiB, 0, 'f', 1)
+                        .arg(activeFeatures.isEmpty() ? tr("none") : activeFeatures.join(QStringLiteral(" · "))));
     scene_->setWordWrap(true);
 
     if (passes_->topLevelItemCount() != static_cast<int>(s->gpuPasses.size())) {

@@ -58,7 +58,7 @@ struct FrameData {
     float4 irradianceSh[9];     // SH9 irradiance / pi
     uint4 lightGrid;            // x tiles across, y tiles down, z tile size (px), w point lights
     column_major float4x4 localShadowMatrices[LOCAL_SHADOW_TILES];  // spot / point-face tiles (8x8 atlas)
-    float4 localShadowParams;   // x enabled, y 1/atlas size, z tiles per side
+    float4 localShadowParams;   // x enabled, y 1/atlas size, z tiles per side, w asfloat(atlas bindless index)
     float4 grading;             // x contrast, y saturation, z temperature, w tint
     float4 depthOfField;        // x focus distance, y focus range, z max blur (px), w near plane
     float4 sunShafts;           // xy sun on screen (uv), z intensity, w visibility
@@ -69,7 +69,7 @@ struct FrameData {
     float4 jitter;              // xy this frame's sub-pixel offset (NDC), zw last frame's
     uint4 probeCount;           // x reflection probes
     GpuReflectionProbe probes[MAX_REFLECTION_PROBES];
-    uint4 volumeCount;          // x light probe volumes
+    uint4 volumeCount;          // x light probe volumes, y SDF GI irradiance (bindless), z SDF GI active (1/0)
     GpuProbeVolume volumes[MAX_PROBE_VOLUMES];
     uint4 fogVolume;            // x 1 = volumetric fog, yzw froxels along x, y, z
     float4 fogVolumeParams;     // x distance it reaches (m), y anisotropy, z depth jitter (0..1)

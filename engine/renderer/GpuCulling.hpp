@@ -27,6 +27,7 @@ inline constexpr std::uint32_t kCullFlagOcclusion = 1u << 1;
 inline constexpr std::uint32_t kCullFlagHiZValid = 1u << 2;
 
 inline constexpr std::uint32_t kCullInstanceSkipOcclusion = 1u << 0;
+inline constexpr std::uint32_t kCullInstanceSkipFrustum = 1u << 1;
 
 /// Per-instance culling input (matches CullInstance in shaders/gpu_cull.hlsl).
 struct alignas(16) CullInstance {
@@ -37,7 +38,7 @@ struct alignas(16) CullInstance {
     std::int32_t vertexOffset = 0;
     std::uint32_t objectIndex = 0;
     std::uint32_t flags = 0;
-    std::uint32_t reserved = 0;
+    std::uint32_t reserved = 0;  // optional instance count (> 0) for per-slot indirect draws
 };
 static_assert(sizeof(CullInstance) == 48);
 static_assert(alignof(CullInstance) == 16);
@@ -139,7 +140,8 @@ struct CpuCullResult {
                                               std::uint32_t hizTextureIndex = 0xffffffffu,
                                               std::uint32_t hizSamplerIndex = 0,
                                               const CullConfig& config = {},
-                                              bool hizValid = true) noexcept;
+                                              bool hizValid = true,
+                                              const glm::mat4* hizViewProjection = nullptr) noexcept;
 
 /// CPU reference reversed-Z Hi-Z mip builder matching shaders/hiz_build.hlsl bit-for-bit.
 /// Performs conservative min-reduction with extra boundary taps when source dimensions are odd.
@@ -193,7 +195,8 @@ public:
                         const glm::mat4& viewProjection,
                         std::uint32_t instanceCount,
                         bool hizValid = true,
-                        const CullConfig& config = {});
+                        const CullConfig& config = {},
+                        const glm::mat4* hizViewProjection = nullptr);
 
     /// Dispatches Phase-2 culling (CSPhase2) for visibility==2 candidates against the current-frame Hi-Z pyramid.
     void dispatchPhase2(nvrhi::ICommandList* cmd,
@@ -214,6 +217,9 @@ public:
     [[nodiscard]] nvrhi::IBuffer* phase1CountBuffer() const noexcept { return phase1CountBuffer_; }
     [[nodiscard]] nvrhi::IBuffer* phase2IndirectBuffer() const noexcept { return phase2IndirectBuffer_; }
     [[nodiscard]] nvrhi::IBuffer* phase2CountBuffer() const noexcept { return phase2CountBuffer_; }
+    [[nodiscard]] nvrhi::IBuffer* phase1SlotIndirectBuffer() const noexcept { return phase1SlotIndirectBuffer_; }
+    [[nodiscard]] nvrhi::IBuffer* phase2SlotIndirectBuffer() const noexcept { return phase2SlotIndirectBuffer_; }
+    [[nodiscard]] nvrhi::IBuffer* finalSlotIndirectBuffer() const noexcept { return finalSlotIndirectBuffer_; }
     [[nodiscard]] std::uint32_t capacity() const noexcept { return instanceCapacity_; }
     [[nodiscard]] nvrhi::IBindingLayout* cullLayout() const noexcept { return cullLayout_; }
 
@@ -228,7 +234,8 @@ private:
                           const glm::mat4& viewProjection,
                           std::uint32_t instanceCount,
                           bool hizValid,
-                          const CullConfig& config);
+                          const CullConfig& config,
+                          const glm::mat4* hizViewProjection = nullptr);
 
     RenderContext& ctx_;
     nvrhi::BindingLayoutHandle cullLayout_;
@@ -250,6 +257,9 @@ private:
     nvrhi::BufferHandle phase1CountBuffer_;
     nvrhi::BufferHandle phase2IndirectBuffer_;
     nvrhi::BufferHandle phase2CountBuffer_;
+    nvrhi::BufferHandle phase1SlotIndirectBuffer_;
+    nvrhi::BufferHandle phase2SlotIndirectBuffer_;
+    nvrhi::BufferHandle finalSlotIndirectBuffer_;
     nvrhi::BufferHandle phase1ConstantsBuffer_;
     nvrhi::BufferHandle phase2ConstantsBuffer_;
     nvrhi::BindingSetHandle phase1CullSet_;

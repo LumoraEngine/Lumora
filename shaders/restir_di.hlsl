@@ -117,6 +117,100 @@ float3 restirEvaluateIncidentLight(GpuLight light, float3 worldPos, float3 N) {
     return lightRgb * (intensity * attenuation * NdotL);
 }
 
+#if defined(LUMORA_RESTIR_SPATIAL)
+float restirLocalShadow(GpuLight light, float3 position, float3 normal, float dist) {
+    int tile = (int)light.spot.z;
+    uint atlas = asuint(gFrame.localShadowParams.w);
+    if (tile < 0 || gFrame.localShadowParams.x <= 0.5 || atlas == NO_TEXTURE) {
+        return 1.0;
+    }
+    if ((int)light.directionType.w != LIGHT_SPOT) {
+        float3 d = position - light.positionRange.xyz;
+        float3 a = abs(d);
+        tile += a.x >= a.y && a.x >= a.z ? (d.x > 0.0 ? 0 : 1) : (a.y >= a.z ? (d.y > 0.0 ? 2 : 3) : (d.z > 0.0 ? 4 : 5));
+    }
+    float3 p = position + normal * (0.02 + dist * 0.006);
+    float4 clip = mul(gFrame.localShadowMatrices[tile], float4(p, 1.0));
+    if (clip.w <= 0.0) {
+        return 1.0;
+    }
+    float3 ndc = clip.xyz / clip.w;
+    if (any(abs(ndc.xy) > 1.0) || ndc.z > 1.0) {
+        return 1.0;
+    }
+    float texel = gFrame.localShadowParams.y;
+    float grid = gFrame.localShadowParams.z;
+    float2 tileOrigin = float2(tile % (int)grid, tile / (int)grid) / grid;
+    float2 inTile = clamp(ndc.xy * 0.5 + 0.5, texel * grid * 1.5, 1.0 - texel * grid * 1.5);
+    float2 uv = tileOrigin + inTile / grid;
+    uint smp = (uint)gFrame.shadowParams.y;
+    float depth = ndc.z - 0.0005;
+    float sum = 0.0;
+    [unroll] for (int j = 0; j < 2; ++j) {
+        [unroll] for (int i = 0; i < 2; ++i) {
+            float2 offset = (float2(i, j) - 0.5) * texel;
+            sum += gTextures[atlas].SampleCmpLevelZero(gShadowSamplers[smp], uv + offset, depth);
+        }
+    }
+    return sum * 0.25;
+}
+
+float restirDistributionGGX(float NdotH, float alpha) {
+    float a2 = alpha * alpha;
+    float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    return a2 / max(PI * d * d, 1e-7);
+}
+
+float restirVisibilitySmithGGXCorrelated(float NdotV, float NdotL, float alpha) {
+    float a2 = alpha * alpha;
+    float lambdaV = NdotL * sqrt(NdotV * NdotV * (1.0 - a2) + a2);
+    float lambdaL = NdotV * sqrt(NdotL * NdotL * (1.0 - a2) + a2);
+    return 0.5 / max(lambdaV + lambdaL, 1e-5);
+}
+
+float3 restirFresnelSchlick(float cosTheta, float3 F0) {
+    return F0 + (1.0 - F0) * pow(saturate(1.0 - cosTheta), 5.0);
+}
+
+float2 restirEnvironmentBrdf(float NdotV, float roughness) {
+    const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+    const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+    float4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return float2(-1.04, 1.04) * a004 + r.zw;
+}
+
+float restirDiffuseBurley(float NdotV, float NdotL, float LdotH, float roughness) {
+    float energyBias = lerp(0.0, 0.5, roughness);
+    float energyFactor = lerp(1.0, 1.0 / 1.51, roughness);
+    float f90 = energyBias + 2.0 * LdotH * LdotH * roughness;
+    float lightScatter = 1.0 + (f90 - 1.0) * pow(1.0 - NdotL, 5.0);
+    float viewScatter = 1.0 + (f90 - 1.0) * pow(1.0 - NdotV, 5.0);
+    return lightScatter * viewScatter * energyFactor / PI;
+}
+
+float3 restirEvaluatePbrLight(float3 position, float3 normal, float3 viewDir, float3 albedo, float metallic,
+                              float roughness, float3 L, float3 radiance) {
+    float NdotL = saturate(dot(normal, L));
+    if (NdotL <= 0.0) {
+        return float3(0.0, 0.0, 0.0);
+    }
+    float3 H = normalize(viewDir + L);
+    float NdotV = max(dot(normal, viewDir), 1e-4);
+    float NdotH = saturate(dot(normal, H));
+    float LdotH = saturate(dot(L, H));
+    float alpha = roughness * roughness;
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    float3 F = restirFresnelSchlick(LdotH, F0);
+    float2 envBrdf = restirEnvironmentBrdf(NdotV, roughness);
+    float singleScatter = max(envBrdf.x + envBrdf.y, 1e-3);
+    float3 comp = 1.0 + F0 * (1.0 / singleScatter - 1.0);
+    float3 specular = restirDistributionGGX(NdotH, alpha) * restirVisibilitySmithGGXCorrelated(NdotV, NdotL, alpha) * F * comp;
+    float3 diffuse = (1.0 - F) * (1.0 - metallic) * albedo * restirDiffuseBurley(NdotV, NdotL, LdotH, roughness);
+    return (diffuse + specular) * radiance * NdotL;
+}
+#endif
+
 float restirLuminance(float3 c) {
     return dot(c, float3(0.2126, 0.7152, 0.0722));
 }
@@ -299,6 +393,7 @@ void CSInitialTemporal(uint3 id : SV_DispatchThreadID) {
     gReservoirOut[p] = packReservoir(outRes);
 }
 
+#if defined(LUMORA_RESTIR_SPATIAL)
 // gPush for CSSpatialResolve:
 //   index0 = depth texture (bindless)
 //   index1 = albedo texture (bindless, or NO_TEXTURE -> white)
@@ -330,9 +425,10 @@ void CSSpatialResolve(uint3 id : SV_DispatchThreadID) {
 
     const float3 N = normalize(normalRaw.xyz);
     const float3 worldPos = reconstructWorldPos(p, depth);
-    float3 albedo = float3(1.0, 1.0, 1.0);
-    if (albedoIdx != NO_TEXTURE) {
-        albedo = max(gTextures[albedoIdx].Load(int3(p, 0)).rgb, float3(0.0, 0.0, 0.0));
+    const bool hasPbrSurface = (albedoIdx != NO_TEXTURE);
+    float4 albedoMet = float4(1.0, 1.0, 1.0, 0.0);
+    if (hasPbrSurface) {
+        albedoMet = gTextures[albedoIdx].Load(int3(p, 0));
     }
 
     const bool unbiasedMis = (gPush.flags & 1u) == 0u;
@@ -425,7 +521,45 @@ void CSSpatialResolve(uint3 id : SV_DispatchThreadID) {
 
     float3 radianceOut = float3(0.0, 0.0, 0.0);
     if (combined.W > 0.0 && combined.lightIndex < lightCount) {
-        radianceOut = (albedo / PI) * restirEvaluateIncidentLight(gPointLights[combined.lightIndex], worldPos, N) * combined.W;
+        GpuLight chosenLight = gPointLights[combined.lightIndex];
+        if (!hasPbrSurface) {
+            radianceOut = (float3(1.0, 1.0, 1.0) / PI) * restirEvaluateIncidentLight(chosenLight, worldPos, N) * combined.W;
+        } else {
+            float3 toLight = chosenLight.positionRange.xyz - worldPos;
+            float distSq = dot(toLight, toLight);
+            if (distSq > 1e-12) {
+                float dist = sqrt(distSq);
+                float3 L = toLight / dist;
+                float attenuation = restirPointAttenuation(dist, chosenLight.positionRange.w);
+                if ((int)chosenLight.directionType.w == LIGHT_SPOT) {
+                    float dirLenSq = dot(chosenLight.directionType.xyz, chosenLight.directionType.xyz);
+                    if (dirLenSq > 1e-8) {
+                        float3 spotDir = chosenLight.directionType.xyz * rsqrt(dirLenSq);
+                        float cosAngle = dot(-L, spotDir);
+                        float edge0 = chosenLight.spot.x;
+                        float edge1 = max(chosenLight.spot.y, edge0 + 1e-5);
+                        attenuation *= smoothstep(edge0, edge1, cosAngle);
+                    }
+                }
+                if (attenuation > 0.0) {
+                    float shadow = restirLocalShadow(chosenLight, worldPos, N, dist);
+                    float3 lightRadiance = max(chosenLight.colorIntensity.rgb, float3(0.0, 0.0, 0.0)) *
+                                           max(chosenLight.colorIntensity.w, 0.0) * attenuation * shadow;
+                    float3 toCam = gFrame.cameraPositionTime.xyz - worldPos;
+                    float camDistSq = dot(toCam, toCam);
+                    float3 V = camDistSq > 1e-12 ? toCam * rsqrt(camDistSq) : N;
+                    float3 albedo = max(albedoMet.rgb, float3(0.0, 0.0, 0.0));
+                    float metallic = saturate(albedoMet.a);
+                    float roughness = clamp(normalRaw.w, 0.04, 1.0);
+                    radianceOut = restirEvaluatePbrLight(worldPos, N, V, albedo, metallic, roughness, L, lightRadiance) *
+                                  combined.W;
+                }
+            }
+        }
+        if (any(isnan(radianceOut)) || any(isinf(radianceOut))) {
+            radianceOut = float3(0.0, 0.0, 0.0);
+        }
     }
-    gHdrOut[p] = float4(radianceOut, 1.0);
+    gHdrOut[p] = float4(max(radianceOut, float3(0.0, 0.0, 0.0)), 1.0);
 }
+#endif

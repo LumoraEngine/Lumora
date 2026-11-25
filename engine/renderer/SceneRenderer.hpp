@@ -270,10 +270,14 @@ private:
     nvrhi::ComputePipelineHandle fogIntegrate_;
     nvrhi::ComputePipelineHandle ssrTrace_;
     nvrhi::ComputePipelineHandle ssrResolve_;
-    // The opaque pipelines writing normal + roughness and the specular weight too (for SSR).
+    // The opaque pipelines writing normal + roughness and the specular weight too (for SSR / ReSTIR).
     nvrhi::GraphicsPipelineHandle opaqueReflections_;
     nvrhi::GraphicsPipelineHandle opaqueReflectionsTwoSided_;
     nvrhi::GraphicsPipelineHandle opaqueReflectionsSkinned_;
+    nvrhi::GraphicsPipelineHandle opaqueRestir_;
+    nvrhi::GraphicsPipelineHandle opaqueRestirTwoSided_;
+    nvrhi::GraphicsPipelineHandle opaqueRestirSkinned_;
+    nvrhi::ComputePipelineHandle restirComposite_;
     std::uint64_t taaFrame_ = 0;
     bool taaHistoryValid_ = false;
     glm::mat4 previousViewProjection_{1.0f};
@@ -371,7 +375,8 @@ private:
     [[nodiscard]] GpuOcclusionCuller* ensureGpuCulling();
     [[nodiscard]] SdfGiPass* ensureSdfGi();
     [[nodiscard]] RestirPass* ensureRestir();
-    void ensureSdfGiVolume(const Scene& scene);
+    void ensureLocalShadowAtlas(std::uint32_t size);
+    void ensureSdfGiVolume(const Scene& scene, const EnvironmentSettings& env, AssetLibrary* assets);
     void ensureSdfGiOutput(std::uint32_t width, std::uint32_t height);
 
     std::unique_ptr<GpuOcclusionCuller> gpuCulling_;
@@ -384,6 +389,7 @@ private:
     const Scene* gpuCullingLastScene_ = nullptr;
     glm::vec3 gpuCullingPreviousCameraPosition_{0.0f};
     glm::vec3 gpuCullingPreviousCameraForward_{0.0f, 0.0f, -1.0f};
+    glm::mat4 gpuCullingPreviousViewProjection_{1.0f};
     bool sdfGiAutoBuilt_ = false;
     std::uint64_t sdfGiSceneHash_ = 0;
     nvrhi::TextureHandle sdfGiOutput_;

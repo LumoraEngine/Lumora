@@ -515,6 +515,36 @@ void propagateSdfMultiBounce(SdfVolumeData& volume, std::uint32_t bounces, std::
     }
 }
 
+void injectSceneLightsToSurfels(const Scene& scene, SdfVolumeData& volume) {
+    if (volume.distanceField.empty() || volume.surfelCache.empty()) return;
+    const entt::registry& reg = scene.registry();
+
+    std::vector<std::pair<glm::vec3, glm::vec3>> directionalLights;
+    std::vector<GpuLight> localLights;
+    for (auto [entity, light, world] : reg.view<LightComponent, WorldTransformComponent>().each()) {
+        (void)entity;
+        if (light.intensity <= 0.0f) continue;
+        const glm::vec3 position(world.matrix[3]);
+        const glm::vec3 travelDir = glm::normalize(glm::vec3(world.matrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+        if (light.type == LightType::Directional) {
+            directionalLights.emplace_back(-travelDir, glm::max(light.color, glm::vec3(0.0f)) * light.intensity);
+        } else {
+            GpuLight gl;
+            gl.positionRange = glm::vec4(position, light.range);
+            gl.colorIntensity = glm::vec4(glm::max(light.color, glm::vec3(0.0f)), light.intensity);
+            gl.directionType = glm::vec4(travelDir, static_cast<float>(light.type));
+            if (light.type == LightType::Spot) {
+                const float outer = glm::radians(std::clamp(light.spotAngleDeg, 1.0f, 89.0f));
+                const float inner = outer * (1.0f - std::clamp(light.spotSoftness, 0.0f, 1.0f));
+                gl.spot = glm::vec4(std::cos(outer), std::cos(inner) + 1e-4f, -1.0f, 0.0f);
+            }
+            localLights.push_back(gl);
+        }
+    }
+
+    injectLightsInternal(volume, directionalLights, localLights, glm::vec3(0.0f));
+}
+
 SdfVolumeData buildSdfVolumeFromScene(const Scene& scene, const SdfGridConfig& cfg) {
     const entt::registry& reg = scene.registry();
 
@@ -546,29 +576,7 @@ SdfVolumeData buildSdfVolumeFromScene(const Scene& scene, const SdfGridConfig& c
     SdfVolumeData volume = buildSdfVolumeFromBoxes(cfg, boxes);
     if (boxes.empty()) return volume;
 
-    std::vector<std::pair<glm::vec3, glm::vec3>> directionalLights;
-    std::vector<GpuLight> localLights;
-    for (auto [entity, light, world] : reg.view<LightComponent, WorldTransformComponent>().each()) {
-        if (light.intensity <= 0.0f) continue;
-        const glm::vec3 position(world.matrix[3]);
-        const glm::vec3 travelDir = glm::normalize(glm::vec3(world.matrix * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
-        if (light.type == LightType::Directional) {
-            directionalLights.emplace_back(-travelDir, glm::max(light.color, glm::vec3(0.0f)) * light.intensity);
-        } else {
-            GpuLight gl;
-            gl.positionRange = glm::vec4(position, light.range);
-            gl.colorIntensity = glm::vec4(glm::max(light.color, glm::vec3(0.0f)), light.intensity);
-            gl.directionType = glm::vec4(travelDir, static_cast<float>(light.type));
-            if (light.type == LightType::Spot) {
-                const float outer = glm::radians(std::clamp(light.spotAngleDeg, 1.0f, 89.0f));
-                const float inner = outer * (1.0f - std::clamp(light.spotSoftness, 0.0f, 1.0f));
-                gl.spot = glm::vec4(std::cos(outer), std::cos(inner) + 1e-4f, -1.0f, 0.0f);
-            }
-            localLights.push_back(gl);
-        }
-    }
-
-    injectLightsInternal(volume, directionalLights, localLights, glm::vec3(0.0f));
+    injectSceneLightsToSurfels(scene, volume);
     return volume;
 }
 

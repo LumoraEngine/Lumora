@@ -21,7 +21,7 @@ constexpr std::uint64_t kUnusedFrames = 120;     // then it may be dropped for t
 
 /// A shipped game's cooked texture (see cookTextures), or null if there is none.
 std::shared_ptr<const TextureMips> loadCooked(const std::filesystem::path& root, const std::string& canonical, TextureKind kind,
-                                              const std::string& file) {
+                                              const std::string& file, std::filesystem::path* outPath = nullptr) {
     const std::string relative = relativeTextureKey(root, canonical);
     if (relative.empty()) return nullptr;
     std::error_code ec;
@@ -35,6 +35,7 @@ std::shared_ptr<const TextureMips> loadCooked(const std::filesystem::path& root,
         log::warn("Renderer", "cooked texture {}: {}", cooked.filename().string(), loaded.error().message);
         return nullptr;
     }
+    if (outPath != nullptr) *outPath = cooked;
     return std::make_shared<const TextureMips>(std::move(*loaded));
 }
 
@@ -47,6 +48,7 @@ TextureCache::TextureCache(RenderContext& context) : ctx_(context) {
 TextureCache::~TextureCache() {
     for (auto& [key, entry] : textures_) {
         if (entry.preparing.valid()) entry.preparing.wait();
+        if (entry.reloading.valid()) entry.reloading.wait();
         ctx_.bindless().releaseTexture(entry.bindless);
     }
     for (const Retired& r : retired_) ctx_.bindless().releaseTexture(r.bindless);
@@ -61,6 +63,7 @@ std::size_t TextureCache::invalidateFile(const std::string& file) {
     for (auto it = textures_.begin(); it != textures_.end();) {
         if (fromFile(it->first)) {
             if (it->second.preparing.valid()) it->second.preparing.wait();
+            if (it->second.reloading.valid()) it->second.reloading.wait();
             ctx_.bindless().releaseTexture(it->second.bindless);  // the GPU is idle
             it = textures_.erase(it);
             ++dropped;
@@ -71,11 +74,34 @@ std::size_t TextureCache::invalidateFile(const std::string& file) {
     return dropped;
 }
 
-std::uint32_t TextureCache::levelFor(const TextureMips& mips, float wanted) {
-    const float largest = static_cast<float>(std::max(mips.width, mips.height));
+std::uint32_t TextureCache::levelFor(std::uint32_t width, std::uint32_t height, std::size_t levelCount, float wanted) {
+    if (levelCount == 0) return 0;
+    const float largest = static_cast<float>(std::max(width, height));
     if (!(wanted > 0.0f) || wanted >= largest) return 0;
     const auto level = static_cast<std::uint32_t>(std::floor(std::log2(largest / std::max(wanted, 1.0f))));
-    return std::min(level, static_cast<std::uint32_t>(mips.levels.size() - 1));
+    return std::min(level, static_cast<std::uint32_t>(levelCount - 1));
+}
+
+std::uint32_t TextureCache::levelFor(const TextureMips& mips, float wanted) {
+    return levelFor(mips.width, mips.height, mips.levels.size(), wanted);
+}
+
+std::size_t TextureCache::entryResidentBytes(const Entry& entry, std::uint32_t firstLevel) noexcept {
+    std::size_t total = 0;
+    for (std::size_t i = firstLevel; i < entry.levelBytes.size(); ++i) {
+        total += entry.levelBytes[i];
+    }
+    return total;
+}
+
+void TextureCache::recordMetadata(Entry& entry, const TextureMips& mips) {
+    entry.width = mips.width;
+    entry.height = mips.height;
+    entry.format = mips.format;
+    entry.levelBytes.resize(mips.levels.size());
+    for (std::size_t i = 0; i < mips.levels.size(); ++i) {
+        entry.levelBytes[i] = mips.levels[i].size();
+    }
 }
 
 void TextureCache::retire(Entry& entry) {
@@ -84,8 +110,7 @@ void TextureCache::retire(Entry& entry) {
     entry.bindless = UINT32_MAX;
 }
 
-void TextureCache::upload(Entry& entry, std::uint32_t firstLevel) {
-    const TextureMips& mips = *entry.mips;
+void TextureCache::uploadFromMips(Entry& entry, const TextureMips& mips, std::uint32_t firstLevel) {
     std::vector<std::span<const std::byte>> levels;
     for (std::size_t l = firstLevel; l < mips.levels.size(); ++l) levels.push_back(std::as_bytes(std::span(mips.levels[l])));
     nvrhi::TextureHandle texture =
@@ -94,6 +119,12 @@ void TextureCache::upload(Entry& entry, std::uint32_t firstLevel) {
     entry.texture = texture;
     entry.bindless = ctx_.bindless().registerTexture(texture);
     entry.firstLevel = firstLevel;
+    entry.pendingLevel = UINT32_MAX;
+    entry.lastMipChangeFrame = frame_;
+}
+
+void TextureCache::upload(Entry& entry, std::uint32_t firstLevel) {
+    uploadFromMips(entry, *entry.mips, firstLevel);
 }
 
 std::uint32_t TextureCache::index(AssetLibrary& library, const std::string& key, TextureKind kind, bool block, float wanted) {
@@ -112,10 +143,11 @@ std::uint32_t TextureCache::index(AssetLibrary& library, const std::string& key,
             entry.name = key;
             const std::string file = canonical->substr(0, canonical->find('#'));
             // Block-compressed data only helps a GPU that reads it.
-            if (compression_) entry.mips = loadCooked(library.root(), *canonical, kind, file);
+            if (compression_) entry.mips = loadCooked(library.root(), *canonical, kind, file, &entry.diskPath);
             const std::filesystem::path cached = entry.mips ? std::filesystem::path{} : textureCacheFile(library.root(), id, file);
             if (!cached.empty() && std::filesystem::exists(cached)) {
                 if (auto loaded = loadTextureMips(cached)) {
+                    entry.diskPath = cached;
                     entry.mips = std::make_shared<const TextureMips>(std::move(*loaded));
                 } else {
                     log::warn("Renderer", "texture cache {}: {}", cached.filename().string(), loaded.error().message);
@@ -137,6 +169,7 @@ std::uint32_t TextureCache::index(AssetLibrary& library, const std::string& key,
                     return UINT32_MAX;
                 }
                 const bool compress = compression_;
+                if (!cached.empty() && compress) entry.diskPath = cached;
                 entry.preparing =
                     JobSystem::global()
                         .submit([rgba = data->rgba, width = data->width, height = data->height, kind, compress, cached,
@@ -160,6 +193,7 @@ std::uint32_t TextureCache::index(AssetLibrary& library, const std::string& key,
             entry.preparing = {};
         }
     }
+    recordMetadata(entry, *entry.mips);
     std::uint32_t first = levelFor(*entry.mips, entry.wanted);
     if (!block) first = std::max(first, levelFor(*entry.mips, static_cast<float>(kFirstAppearance)));
     upload(entry, first);
@@ -174,6 +208,16 @@ void TextureCache::beginFrame() {
         ctx_.bindless().releaseTexture(r.bindless);
         return true;
     });
+    // Finish any background disk reloads before planning this frame's streaming.
+    for (auto& [id, entry] : textures_) {
+        if (entry.reloading.valid() && entry.reloading.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            if (auto loaded = entry.reloading.get()) {
+                entry.mips = std::move(loaded);
+                recordMetadata(entry, *entry.mips);
+            }
+            entry.reloading = {};
+        }
+    }
     // What each texture should have: the finest level anyone asked for last frame. Finer first
     // for the most needed (largest step), within the upload budget of a frame.
     struct Want {
@@ -183,14 +227,19 @@ void TextureCache::beginFrame() {
     std::vector<Want> finer;
     std::size_t resident = 0;
     for (auto& [id, entry] : textures_) {
-        if (!entry.texture || !entry.mips) {
+        if (!entry.texture || entry.levelBytes.empty()) {
             entry.wanted = 0.0f;
             continue;
         }
-        resident += entry.mips->bytes(entry.firstLevel);
+        resident += entryResidentBytes(entry, entry.firstLevel);
+        std::uint32_t desired = entry.pendingLevel;
         if (entry.lastUsed + 1 >= frame_) {
-            const std::uint32_t level = levelFor(*entry.mips, entry.wanted);
-            if (level < entry.firstLevel) finer.push_back({&entry, level});
+            const std::uint32_t level = levelFor(entry.width, entry.height, entry.levelBytes.size(), entry.wanted);
+            desired = std::min(desired, level);
+        }
+        if (desired < entry.firstLevel) {
+            entry.pendingLevel = desired;
+            finer.push_back({&entry, desired});
         }
         entry.wanted = 0.0f;
     }
@@ -201,65 +250,110 @@ void TextureCache::beginFrame() {
     reduced_ = 0;
     std::size_t uploaded = 0;
     for (const Want& w : finer) {
-        const std::size_t bytes = w.entry->mips->bytes(w.level);
+        if (!w.entry->mips) {
+            if (!w.entry->diskPath.empty() && !w.entry->reloading.valid()) {
+                std::filesystem::path diskPath = w.entry->diskPath;
+                std::string name = w.entry->name;
+                w.entry->reloading =
+                    JobSystem::global()
+                        .submit([path = std::move(diskPath), name = std::move(name)]() -> std::shared_ptr<const TextureMips> {
+                            auto loaded = loadTextureMips(path);
+                            if (!loaded) {
+                                log::warn("Renderer", "texture reload '{}': {}", name, loaded.error().message);
+                                return nullptr;
+                            }
+                            return std::make_shared<const TextureMips>(std::move(*loaded));
+                        })
+                        .share();
+            }
+            continue;
+        }
+        const std::size_t bytes = entryResidentBytes(*w.entry, w.level);
         if (uploaded > 0 && uploaded + bytes > uploadPerFrame_) break;
-        const std::size_t extra = bytes - w.entry->mips->bytes(w.entry->firstLevel);
+        const std::size_t extra = bytes - entryResidentBytes(*w.entry, w.entry->firstLevel);
         if (resident + extra > budget_) continue;  // would only be taken away again
         resident += extra;
         upload(*w.entry, w.level);
         uploaded += bytes;
         ++streamedIn_;
     }
-    if (resident <= budget_) return;
-    // Over budget: drop what nothing used for a while (oldest first), then take the finest level
-    // off the largest textures in use until it fits.
-    std::vector<Entry*> unused;
-    std::vector<Entry*> used;
-    for (auto& [id, entry] : textures_) {
-        if (!entry.texture) continue;
-        (entry.lastUsed + kUnusedFrames < frame_ ? unused : used).push_back(&entry);
-    }
-    std::ranges::sort(unused, std::less<>{}, &Entry::lastUsed);
-    for (Entry* e : unused) {
-        if (resident <= budget_) return;
-        resident -= e->mips->bytes(e->firstLevel);
-        retire(*e);
-        ++reduced_;
-    }
-    // As many levels as it takes this frame (largest first, a level at a time), then one upload
-    // per texture at the level it ends up with.
-    struct Plan {
-        Entry* entry;
-        std::uint32_t level;
-    };
-    std::vector<Plan> plans;
-    plans.reserve(used.size());
-    for (Entry* e : used) plans.push_back({e, e->firstLevel});
-    for (bool progress = true; resident > budget_ && progress;) {
-        progress = false;
-        std::ranges::sort(plans, [](const Plan& a, const Plan& b) { return a.entry->mips->bytes(a.level) > b.entry->mips->bytes(b.level); });
-        for (Plan& p : plans) {
-            if (resident <= budget_) break;
-            if (p.level + 1 >= p.entry->mips->levels.size()) continue;
-            resident -= p.entry->mips->bytes(p.level) - p.entry->mips->bytes(p.level + 1);
-            ++p.level;
-            progress = true;
+    if (resident > budget_) {
+        // Over budget: drop what nothing used for a while (oldest first), then take the finest level
+        // off the largest textures in use until it fits.
+        std::vector<Entry*> unused;
+        std::vector<Entry*> used;
+        for (auto& [id, entry] : textures_) {
+            if (!entry.texture) continue;
+            (entry.lastUsed + kUnusedFrames < frame_ ? unused : used).push_back(&entry);
+        }
+        std::ranges::sort(unused, std::less<>{}, &Entry::lastUsed);
+        bool underBudget = false;
+        for (Entry* e : unused) {
+            if (resident <= budget_) {
+                underBudget = true;
+                break;
+            }
+            resident -= entryResidentBytes(*e, e->firstLevel);
+            retire(*e);
+            ++reduced_;
+        }
+        if (!underBudget && resident > budget_) {
+            struct Plan {
+                Entry* entry;
+                std::uint32_t level;
+            };
+            std::vector<Plan> plans;
+            plans.reserve(used.size());
+            for (Entry* e : used) plans.push_back({e, e->firstLevel});
+            for (bool progress = true; resident > budget_ && progress;) {
+                progress = false;
+                std::ranges::sort(plans, [](const Plan& a, const Plan& b) {
+                    return entryResidentBytes(*a.entry, a.level) > entryResidentBytes(*b.entry, b.level);
+                });
+                for (Plan& p : plans) {
+                    if (resident <= budget_) break;
+                    if (p.level + 1 >= p.entry->levelBytes.size()) continue;
+                    resident -= entryResidentBytes(*p.entry, p.level) - entryResidentBytes(*p.entry, p.level + 1);
+                    ++p.level;
+                    progress = true;
+                }
+            }
+            for (const Plan& p : plans) {
+                if (p.level == p.entry->firstLevel) continue;
+                if (p.entry->mips) {
+                    upload(*p.entry, p.level);
+                    ++reduced_;
+                } else if (!p.entry->diskPath.empty()) {
+                    if (auto loaded = loadTextureMips(p.entry->diskPath)) {
+                        uploadFromMips(*p.entry, *loaded, p.level);
+                        ++reduced_;
+                    }
+                }
+            }
         }
     }
-    for (const Plan& p : plans) {
-        if (p.level == p.entry->firstLevel) continue;
-        upload(*p.entry, p.level);
-        ++reduced_;
+
+    // Release CPU mip chains for textures backed by disk cache once their resident mips settle.
+    for (auto& [id, entry] : textures_) {
+        if (!entry.texture || !entry.mips || entry.diskPath.empty() || entry.reloading.valid()) continue;
+        if (entry.pendingLevel < entry.firstLevel) continue;
+        if (frame_ >= entry.lastMipChangeFrame + ramReleaseIdleFrames_) {
+            std::error_code ec;
+            if (std::filesystem::exists(entry.diskPath, ec)) {
+                entry.mips.reset();
+            }
+        }
     }
 }
 
 TextureCache::Stats TextureCache::stats() const {
     Stats s;
     for (const auto& [id, entry] : textures_) {
-        if (!entry.texture || !entry.mips) continue;
+        if (entry.mips) s.cpuCacheBytes += entry.mips->bytes(0);
+        if (!entry.texture || entry.levelBytes.empty()) continue;
         ++s.textures;
-        s.residentBytes += entry.mips->bytes(entry.firstLevel);
-        if (entry.mips->format != nvrhi::Format::RGBA8_UNORM && entry.mips->format != nvrhi::Format::SRGBA8_UNORM) ++s.compressed;
+        s.residentBytes += entryResidentBytes(entry, entry.firstLevel);
+        if (entry.format != nvrhi::Format::RGBA8_UNORM && entry.format != nvrhi::Format::SRGBA8_UNORM) ++s.compressed;
     }
     s.streamedIn = streamedIn_;
     s.reduced = reduced_;

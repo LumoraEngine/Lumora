@@ -115,12 +115,14 @@ Warunek dla kompresji tekstur (1.7).
   Światła punktowe i reflektory: osobne wirtualne mapy zamiast atlasu 16 kafli.
 
 ### 1.7 Kompresja i streaming tekstur (L), zależy od 0.4
-- **Stan: zrobione z zastrzeżeniami.** `stb_dxt`: BC1 (dane), BC5 (normalne,
+- **Stan: zrobione.** `stb_dxt`: BC1 (dane), BC5 (normalne,
   z odtwarzane w shaderze); cache `Saved/TextureCache/*.ltex`. Streaming: mipy od rozmiaru na ekranie,
   start z ≤256 texeli, ≤48 MB wgrywania na klatkę, budżet 1,5 GB (zrzucanie nieużywanych, potem
   najdrobniejszych mipów). Kolor: BC7 (bc7enc z bc7enc_rdo, 45 dB zamiast 38,5 dB BC1 na zdjęciu;
-  w eksporcie gotowe przez cooking). Brakuje: zwalniania
-  pełnych łańcuchów z RAM (dziś trzymane w pamięci).
+  w eksporcie gotowe przez cooking). Bezczynne łańcuchy mipów z dysku są automatycznie zwalniane
+  z RAM po skonfigurowanej liczbie klatek (`setRamReleaseIdleFrames`, domyślnie 60), zachowując
+  lekkie metadane rozmiarów do budżetowania VRAM (`cpuCacheBytes` w `TextureCache::Stats`) i
+  asynchroniczne doładowanie z dysku przez `JobSystem` przy powrocie do większej szczegółowości.
 - **Kompresja:** BC7 (kolor), BC5 (normalne), BC4 (maski) kodowane przy imporcie do pamięci
   podręcznej w `Saved/`, plus wczytywanie KTX2/Basis (2.1). Na webie: transkodowanie Basis.
 - **Streaming:** mipy dociągane według odległości i rozmiaru na ekranie, budżet VRAM, wyrzucanie
@@ -348,14 +350,18 @@ Platforma w `GameExporter` i oknie eksportu, Build Support „Web” w Hubie, za
      (`engine/core/ArchetypeStore.{hpp,cpp}`).
    - Kolejki bezblokadowe `SpscRingBuffer` / `MpmcBoundedQueue` i system zadań na włóknach
      `FiberJobSystem` z `JobCounter` (`engine/core/LockFreeQueue.hpp`, `FiberJobSystem.{hpp,cpp}`).
-2. **Potok renderowania AAA (`lumora_renderer`, `lumora_assets`, `shaders/`) — zrobione (opt-in w `RenderSettings`):**
-   - Dwufazowy culling okluzyjny Hi-Z na GPU i rysowanie pośrednie (`engine/renderer/GpuCulling.{hpp,cpp}`,
-     `shaders/hiz_build.hlsl`, `shaders/gpu_cull.hlsl`).
+2. **Potok renderowania AAA (`lumora_renderer`, `lumora_assets`, `shaders/`) — zrobione (pełna integracja w `SceneRenderer` + przełączniki `View > Rendering` w edytorze i odczyt w `ProfilerPanel`):**
+   - Dwufazowy culling okluzyjny Hi-Z na GPU i rysowanie pośrednie `drawIndexedIndirect` z czasową
+     reprojekcją w `DepthPrepass`, `DepthPrepassPhase2` i `Opaque`
+     (`engine/renderer/GpuCulling.{hpp,cpp}`, `shaders/hiz_build.hlsl`, `shaders/gpu_cull.hlsl`).
    - Podział siatek na meshlety 64v/124t i culling stożków normalnych (`engine/assets/Meshlets.{hpp,cpp}`).
-   - Globalne oświetlenie ray-traced na polach odległości SDF i cache surfli
-     (`engine/renderer/SdfGi.{hpp,cpp}`, `shaders/rtgi_sdf.hlsl`).
-   - ReSTIR DI z czasowo-przestrzennym próbkowaniem rezerwuarów (`engine/renderer/RestirLighting.{hpp,cpp}`,
-     `shaders/restir_di.hlsl`).
+   - Globalne oświetlenie ray-traced na polach odległości SDF i cache surfli budowanych z
+     rzeczywistych granic siatek i materiałów `.lmat`, zasilające składową ambient diffuse w `Opaque`
+     (`engine/renderer/SdfGi.{hpp,cpp}`, `shaders/rtgi_sdf.hlsl`, `shaders/lighting.hlsli`, `shaders/mesh.hlsl`).
+   - ReSTIR DI z G-bufferem albedo/metallic (`shaders/mesh_restir.hlsl`), czasowo-przestrzennym
+     próbkowaniem rezerwuarów GGX+Burley PBR i cieniami lokalnymi (`engine/renderer/RestirLighting.{hpp,cpp}`,
+     `shaders/restir_di.hlsl`, `shaders/restir_spatial.hlsl`) oraz kompozycją HDR z mgłą
+     (`shaders/restir_composite.hlsl`).
 3. **Fizyka pojazdów, animacja proceduralna i tłum (`lumora_runtime`) — zrobione:**
    - Dynamika pojazdów Pacejka, elipsa tarcia, zawieszenie, skrzynia biegów i LSD
      (`runtime/VehicleDynamics.{hpp,cpp}`, spięte z `PhysicsWorld`).

@@ -172,6 +172,20 @@ SceneRenderer::SceneRenderer(RenderContext& context) : ctx_(context) {
         reflections.cull = nvrhi::RasterCullMode::None;
         opaqueReflectionsTwoSided_ = make(reflections);
     }
+    {
+        PipelineDesc restir = opaque;  // skinned at this point
+        restir.name = "OpaquePBRRestirSkinned";
+        restir.pixelShader = "mesh.restir.frag";
+        restir.colorFormats = {hdr, kSurfaceFormat, kSurfaceFormat, kSurfaceFormat};
+        opaqueRestirSkinned_ = make(restir);
+        restir.name = "OpaquePBRRestir";
+        restir.vertexShader = "mesh.vert";
+        restir.input = VertexInput::Mesh;
+        opaqueRestir_ = make(restir);
+        restir.name = "OpaquePBRRestirTwoSided";
+        restir.cull = nvrhi::RasterCullMode::None;
+        opaqueRestirTwoSided_ = make(restir);
+    }
     PipelineDesc transparent = opaque;  // depth tested against the opaque scene, never written
     transparent.name = "TransparentPBRSkinned";
     transparent.blend = BlendMode::Alpha;
@@ -249,6 +263,7 @@ SceneRenderer::SceneRenderer(RenderContext& context) : ctx_(context) {
     fogIntegrate_ = ctx_.createComputePipeline("fog.integrate.comp");
     ssrTrace_ = ctx_.createComputePipeline("ssr.trace.comp", "CSTrace");
     ssrResolve_ = ctx_.createComputePipeline("ssr.resolve.comp", "CSResolve");
+    restirComposite_ = ctx_.createComputePipeline("restir.composite.comp");
 
     PipelineDesc prepass;
     prepass.name = "DepthPrepass";
@@ -402,6 +417,22 @@ RestirPass* SceneRenderer::ensureRestir() {
                         [this] { return std::make_unique<RestirPass>(ctx_); });
 }
 
+void SceneRenderer::ensureLocalShadowAtlas(std::uint32_t size) {
+    if (localAtlas_ || size == 0u) return;
+    nvrhi::TextureDesc desc;
+    desc.width = desc.height = size;
+    desc.format = ctx_.depthFormat();
+    desc.debugName = "LocalShadowAtlas";
+    desc.isRenderTarget = true;
+    desc.setClearValue(nvrhi::Color(1.0f));
+    desc.initialState = nvrhi::ResourceStates::ShaderResource;
+    desc.keepInitialState = true;
+    localAtlas_ = ctx_.gpu()->createTexture(desc);
+    if (!localAtlas_) throw rhi::VulkanError("could not create the local shadow atlas", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    localAtlasIndex_ = ctx_.bindless().registerTexture(localAtlas_);
+    localTileContents_.fill(0);
+}
+
 void SceneRenderer::ensureSdfGiOutput(std::uint32_t width, std::uint32_t height) {
     if (width == 0u || height == 0u) return;
     if (sdfGiOutput_ && sdfGiWidth_ == width && sdfGiHeight_ == height) return;
@@ -426,7 +457,7 @@ void SceneRenderer::ensureSdfGiOutput(std::uint32_t width, std::uint32_t height)
     sdfGiHeight_ = height;
 }
 
-void SceneRenderer::ensureSdfGiVolume(const Scene& scene) {
+void SceneRenderer::ensureSdfGiVolume(const Scene& scene, const EnvironmentSettings& env, AssetLibrary* assets) {
     SdfGiPass* sdfGiPass = ensureSdfGi();
     if (sdfGiPass == nullptr) return;
     if (sdfGiPass->hasVolume() && !sdfGiAutoBuilt_) return;
@@ -439,34 +470,64 @@ void SceneRenderer::ensureSdfGiVolume(const Scene& scene) {
         mix(std::bit_cast<std::uint32_t>(v.y));
         mix(std::bit_cast<std::uint32_t>(v.z));
     };
+    mix(std::bit_cast<std::uint32_t>(std::max(env.ambientIntensity, 0.0f)));
 
     glm::vec3 sceneMin(std::numeric_limits<float>::max());
     glm::vec3 sceneMax(-std::numeric_limits<float>::max());
-    bool anyMesh = false;
+    std::vector<SdfBoxProxy> boxes;
 
     for (auto [entity, mesh, world] : reg.view<MeshRendererComponent, WorldTransformComponent>().each()) {
-        if (!mesh.visible || mesh.opacity < 0.5f) continue;
-        anyMesh = true;
+        if (!mesh.visible) continue;
+        std::shared_ptr<const MaterialAsset> mat;
+        if (!mesh.material.empty() && assets != nullptr) {
+            mat = assets->material(mesh.material);
+        }
+        const float opacity =
+            mat != nullptr ? (mat->alphaMode == MaterialAsset::AlphaMode::Transparent ? mat->opacity : 1.0f) : mesh.opacity;
+        if (opacity < 0.5f) continue;
+
+        glm::vec3 localCenter(0.0f);
+        glm::vec3 localHalf = mesh.mesh == MeshPrimitive::Plane ? glm::vec3(0.5f, 0.02f, 0.5f) : glm::vec3(0.5f);
+        if (!mesh.meshAsset.empty()) {
+            if (const GpuMesh* gm = meshFor(mesh, assets, false)) {
+                localCenter = 0.5f * (gm->bounds.min + gm->bounds.max);
+                localHalf = glm::max(0.5f * (gm->bounds.max - gm->bounds.min), glm::vec3(0.02f));
+            }
+        }
+
+        const glm::vec3 albedo = glm::max(mat != nullptr ? mat->baseColor : mesh.baseColor, glm::vec3(0.0f));
+        const glm::vec3 emissive =
+            glm::max(mat != nullptr ? mat->emissive * mat->emissiveStrength : mesh.emissive * mesh.emissiveStrength, glm::vec3(0.0f));
+        const float roughness = std::clamp(mat != nullptr ? mat->roughness : mesh.roughness, 0.05f, 1.0f);
+
         mix(static_cast<std::uint64_t>(entt::to_integral(entity)));
         mix(static_cast<std::uint64_t>(mesh.mesh));
+        mixVec3(localCenter);
+        mixVec3(localHalf);
         for (int col = 0; col < 4; ++col) {
             for (int row = 0; row < 4; ++row) {
                 mix(std::bit_cast<std::uint32_t>(world.matrix[col][row]));
             }
         }
-        mixVec3(mesh.baseColor);
-        mixVec3(mesh.emissive);
-        mix(std::bit_cast<std::uint32_t>(mesh.emissiveStrength));
-        mix(std::bit_cast<std::uint32_t>(mesh.roughness));
+        mixVec3(albedo);
+        mixVec3(emissive);
+        mix(std::bit_cast<std::uint32_t>(roughness));
 
-        const glm::vec3 localHalf = mesh.mesh == MeshPrimitive::Plane ? glm::vec3(0.5f, 0.02f, 0.5f) : glm::vec3(0.5f);
-        const glm::vec3 center(world.matrix[3]);
+        const glm::vec3 center = glm::vec3(world.matrix * glm::vec4(localCenter, 1.0f));
         const glm::mat3 m(world.matrix);
         const glm::vec3 halfExtents = glm::max(
             glm::abs(m[0]) * localHalf.x + glm::abs(m[1]) * localHalf.y + glm::abs(m[2]) * localHalf.z,
             glm::vec3(0.02f));
         sceneMin = glm::min(sceneMin, center - halfExtents);
         sceneMax = glm::max(sceneMax, center + halfExtents);
+
+        SdfBoxProxy proxy;
+        proxy.min = center - halfExtents;
+        proxy.max = center + halfExtents;
+        proxy.albedo = albedo;
+        proxy.emissive = emissive;
+        proxy.roughness = roughness;
+        boxes.push_back(proxy);
     }
 
     for (auto [entity, light, world] : reg.view<LightComponent, WorldTransformComponent>().each()) {
@@ -478,6 +539,8 @@ void SceneRenderer::ensureSdfGiVolume(const Scene& scene) {
         mixVec3(light.color);
         mix(std::bit_cast<std::uint32_t>(light.intensity));
         mix(std::bit_cast<std::uint32_t>(light.range));
+        mix(std::bit_cast<std::uint32_t>(light.spotAngleDeg));
+        mix(std::bit_cast<std::uint32_t>(light.spotSoftness));
     }
 
     if (sdfGiPass->hasVolume() && sdfGiAutoBuilt_ && sdfGiSceneHash_ == hash) return;
@@ -485,14 +548,19 @@ void SceneRenderer::ensureSdfGiVolume(const Scene& scene) {
     SdfGridConfig cfg;
     cfg.resolution = {32u, 32u, 32u};
     cfg.raysPerPoint = 8u;
-    if (anyMesh) {
+    cfg.skyIntensity = std::max(env.ambientIntensity, 0.0f);
+    if (!boxes.empty()) {
         const glm::vec3 center = 0.5f * (sceneMin + sceneMax);
         const glm::vec3 halfExtent =
             glm::clamp(0.5f * (sceneMax - sceneMin) + glm::vec3(2.0f), glm::vec3(4.0f), glm::vec3(64.0f));
         cfg.boundsMin = center - halfExtent;
         cfg.boundsMax = center + halfExtent;
     }
-    const SdfVolumeData volume = buildSdfVolumeFromScene(scene, cfg);
+    SdfVolumeData volume = buildSdfVolumeFromBoxes(cfg, boxes);
+    if (!boxes.empty()) {
+        injectSceneLightsToSurfels(scene, volume);
+        propagateSdfMultiBounce(volume, 1u, 8u);
+    }
     sdfGiPass->uploadVolume(volume);
     sdfGiAutoBuilt_ = true;
     sdfGiSceneHash_ = hash;
@@ -651,14 +719,36 @@ SceneDrawStats SceneRenderer::build(RenderGraph& graph, FrameResources& frame, c
                  outputFormat, extent, timeSeconds, ctx_.gpu(), scene.registry(), scene.environment()};
     prepareFrame(f);        // SceneRendererLights.cpp
     gatherObjects(f);       // SceneRendererObjects.cpp
+
+    const VkExtent2D render = f.renderExtent;  // up to TAA; the output's size after it
+    f.gpuOcclusionCulling = settings.gpuOcclusionCulling && !f.draws.empty() && render.width > 0 && render.height > 0;
+    f.sdfGlobalIllumination = settings.sdfGlobalIllumination && !f.draws.empty() && render.width > 0 && render.height > 0;
+    f.restirDirectLighting = settings.restirDirectLighting && render.width > 0 && render.height > 0 &&
+                             opaqueRestir_ && opaqueRestirTwoSided_ && opaqueRestirSkinned_ && restirComposite_;
+    if (f.sdfGlobalIllumination) {
+        if (ensureSdfGi() != nullptr) {
+            ensureSdfGiOutput(render.width, render.height);
+            f.fc.volumeCount.y = sdfGiOutputIndex_;
+            f.fc.volumeCount.z = 1u;
+        } else {
+            f.sdfGlobalIllumination = false;
+            f.fc.volumeCount.y = kNoTexture;
+            f.fc.volumeCount.z = 0u;
+        }
+    } else {
+        f.fc.volumeCount.y = kNoTexture;
+        f.fc.volumeCount.z = 0u;
+    }
+    if (f.localShadows) {
+        ensureLocalShadowAtlas(f.localAtlasSize);
+        f.fc.localShadowParams.w = std::bit_cast<float>(localAtlasIndex_);
+    } else {
+        f.fc.localShadowParams.w = std::bit_cast<float>(kNoTexture);
+    }
+
     selectVirtualPages(f);  // SceneRendererObjects.cpp
 
     // ---- Render graph ----------------------------------------------------------------------
-    const VkExtent2D render = f.renderExtent;  // up to TAA; the output's size after it
-    f.gpuOcclusionCulling = settings.gpuOcclusionCulling && render.width > 0 && render.height > 0;
-    f.sdfGlobalIllumination = settings.sdfGlobalIllumination && render.width > 0 && render.height > 0;
-    f.restirDirectLighting = settings.restirDirectLighting && render.width > 0 && render.height > 0 &&
-                             opaqueReflections_ && opaqueReflectionsTwoSided_ && opaqueReflectionsSkinned_;
     f.hdr = graph.createImage("SceneColorHDR", {ctx_.hdrFormat(), render.width, render.height});
     f.depth = graph.createImage("SceneDepth", {ctx_.depthFormat(), render.width, render.height});
     f.stats.renderWidth = render.width;

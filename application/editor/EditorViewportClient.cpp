@@ -266,7 +266,10 @@ render::RenderSettings EditorViewportClient::viewportSettings() const {
     render::RenderSettings s;
     s.temporalAntiAliasing = true;
     s.renderScale = renderScale;
-    s.screenSpaceReflections = true;
+    s.screenSpaceReflections = screenSpaceReflections;
+    s.gpuOcclusionCulling = gpuOcclusionCulling;
+    s.sdfGlobalIllumination = sdfGlobalIllumination;
+    s.restirDirectLighting = restirDirectLighting;
     s.showGrid = showGrid && !viewingThroughSceneCamera();
     s.selected = ctx_.isPlaying() ? entt::entity{entt::null} : ctx_.selectedEntity();
     if (!ctx_.isPlaying() && ctx_.scene() != nullptr && ctx_.selection().size() > 1) {

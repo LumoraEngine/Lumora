@@ -80,6 +80,8 @@ void SceneRenderer::prepareFrame(SceneFrame& f) {
 
     // ---- Frame constants -------------------------------------------------------------------
     FrameConstants fc;
+    fc.volumeCount = glm::uvec4(0u, kNoTexture, 0u, 0u);
+    fc.localShadowParams.w = std::bit_cast<float>(kNoTexture);
     fc.view = camera.view;
     fc.projection = camera.projection;
     fc.viewProjection = camera.projection * camera.view;
@@ -362,7 +364,8 @@ void SceneRenderer::prepareFrame(SceneFrame& f) {
     const bool localShadows = !localTiles.empty();
     const std::uint32_t localAtlasSize = std::min(4096u, ctx_.caps().maxImageDimension2D) / kLocalShadowGrid * kLocalShadowGrid;
     if (localShadows) {
-        fc.localShadowParams = glm::vec4(1.0f, 1.0f / static_cast<float>(localAtlasSize), static_cast<float>(kLocalShadowGrid), 0.0f);
+        fc.localShadowParams = glm::vec4(1.0f, 1.0f / static_cast<float>(localAtlasSize),
+                                         static_cast<float>(kLocalShadowGrid), std::bit_cast<float>(kNoTexture));
     }
     fc.shadowParams.y = static_cast<float>(ctx_.shadowCompareSampler());  // local shadows use it without a sun
     const bool anyShadows = shadows || localShadows;

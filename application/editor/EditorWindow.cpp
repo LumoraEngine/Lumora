@@ -683,6 +683,23 @@ void EditorWindow::buildMenus() {
         });
     }
     if (resolutions->checkedAction() == nullptr) resolutions->actions().front()->setChecked(true);
+    QMenu* rendering = view->addMenu(tr("Rendering"));
+    auto addRenderToggle = [&](const QString& label, const char* key, bool EditorViewportClient::*member, bool fallback) {
+        const bool saved = QSettings().value(QString::fromLatin1(key), fallback).toBool();
+        client_.get()->*member = saved;
+        QAction* action = rendering->addAction(label);
+        action->setCheckable(true);
+        action->setChecked(saved);
+        connect(action, &QAction::triggered, this, [this, member, key](bool on) {
+            client_.get()->*member = on;
+            QSettings().setValue(QString::fromLatin1(key), on);
+        });
+    };
+    addRenderToggle(tr("Screen-Space Reflections (SSR)"), "viewport/ssr", &EditorViewportClient::screenSpaceReflections, true);
+    addRenderToggle(tr("GPU Occlusion Culling (Hi-Z)"), "viewport/gpuOcclusionCulling",
+                    &EditorViewportClient::gpuOcclusionCulling, false);
+    addRenderToggle(tr("SDF Global Illumination"), "viewport/sdfGi", &EditorViewportClient::sdfGlobalIllumination, false);
+    addRenderToggle(tr("ReSTIR Direct Lighting"), "viewport/restirDi", &EditorViewportClient::restirDirectLighting, false);
     view->addSeparator();
     QMenu* mainArea = view->addMenu(app::theme::icon(QStringLiteral("scene")), tr("Main Area"));
     for (QDockWidget* dock : findChildren<QDockWidget*>()) {

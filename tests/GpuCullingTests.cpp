@@ -515,3 +515,134 @@ TEST(GpuCulling, GpuOcclusionCullerVulkanIntegration) {
 
     ctx->bindless().releaseTexture(depthBindless);
 }
+
+TEST(GpuCulling, SlotIndirectBuffersMatchTwoPhaseVisibility) {
+    std::filesystem::path shaderDir;
+    if (const char* overrideDir = std::getenv("LUMORA_HIZ_TEST_SHADER_DIR"); overrideDir != nullptr && *overrideDir != '\0') {
+        shaderDir = overrideDir;
+    } else {
+        shaderDir = paths::shaderDir();
+    }
+    if (!std::filesystem::exists(shaderDir / "hiz.build.comp.spv") ||
+        !std::filesystem::exists(shaderDir / "gpu.cull.phase1.comp.spv") ||
+        !std::filesystem::exists(shaderDir / "gpu.cull.phase2.comp.spv")) {
+        GTEST_SKIP() << "compiled culling shaders not present in " << shaderDir.string();
+    }
+
+    RenderContextConfig ctxCfg;
+    ctxCfg.requirePresentation = false;
+    ctxCfg.shaderDirectory = shaderDir;
+    ctxCfg.enableValidation = std::getenv("LUMORA_TEST_VALIDATION") != nullptr;
+
+    std::unique_ptr<RenderContext> ctx;
+    try {
+        ctx = std::make_unique<RenderContext>(ctxCfg);
+    } catch (const rhi::UnsupportedHardwareError& e) {
+        GTEST_SKIP() << "no suitable GPU: " << e.what();
+    }
+
+    constexpr std::uint32_t kWidth = 135;
+    constexpr std::uint32_t kHeight = 97;
+
+    FlyCameraController cam;
+    cam.fovDeg = 60.0f;
+    cam.nearPlane = 0.1f;
+    cam.setPosition({0.0f, 0.0f, 5.0f});
+    cam.lookAt({0.0f, 0.0f, 0.0f});
+    const CameraView view = cam.view(static_cast<float>(kWidth) / static_cast<float>(kHeight));
+    const glm::mat4 vp = view.projection * view.view;
+
+    std::vector<CullInstance> instances = {
+        makeInstance({0.0f, 0.0f, -5.0f}, {0.5f, 0.5f, 0.5f}, 11u, 36u, 0u, 0, 0u),
+        makeInstance({0.0f, 0.0f, 2.0f}, {0.4f, 0.4f, 0.4f}, 22u, 48u, 12u, 4, 0u),
+        makeInstance({0.0f, 0.0f, 15.0f}, {0.5f, 0.5f, 0.5f}, 33u, 36u, 0u, 0, 0u),
+        makeInstance({0.0f, 0.0f, -6.0f}, {0.5f, 0.5f, 0.5f}, 44u, 36u, 0u, 0, kCullInstanceSkipOcclusion),
+    };
+    instances[0].reserved = 1u;
+    instances[1].reserved = 1u;
+    instances[2].reserved = 2u;
+    instances[3].reserved = 3u;
+
+    std::vector<float> prevDepth(static_cast<std::size_t>(kWidth) * kHeight, 0.0f);
+    rasterizeWallToDepthBuffer(prevDepth, kWidth, kHeight, vp, {-2.5f, -2.5f, -0.1f}, {2.5f, 2.5f, 0.1f});
+
+    std::vector<float> currDepth(static_cast<std::size_t>(kWidth) * kHeight, 0.0f);
+    rasterizeWallToDepthBuffer(currDepth, kWidth, kHeight, vp, {4.5f, -2.5f, -0.1f}, {8.5f, 2.5f, 0.1f});
+
+    nvrhi::IDevice* gpu = ctx->gpu();
+    GpuOcclusionCuller culler(*ctx);
+
+    FrameResources frame;
+    const FrameConstants fc{};
+    const GpuObject dummyObj{};
+    const glm::mat4 dummyJoint{1.0f};
+    const GpuLight dummyLight{};
+    const std::uint32_t dummyGrid = 0u;
+    frame.constants.write(gpu, std::as_bytes(std::span(&fc, 1)), DynamicBuffer::Kind::Constant, sizeof(FrameConstants), "FC");
+    frame.objects.write(gpu, std::as_bytes(std::span(&dummyObj, 1)), DynamicBuffer::Kind::Structured, sizeof(GpuObject), "Obj");
+    frame.joints.write(gpu, std::as_bytes(std::span(&dummyJoint, 1)), DynamicBuffer::Kind::Structured, sizeof(glm::mat4), "Jnt");
+    frame.pointLights.write(gpu, std::as_bytes(std::span(&dummyLight, 1)), DynamicBuffer::Kind::Structured, sizeof(GpuLight), "Lgt");
+    frame.lightGrid.write(gpu, std::as_bytes(std::span(&dummyGrid, 1)), DynamicBuffer::Kind::Structured, sizeof(std::uint32_t), "Grd");
+    nvrhi::IBindingSet* frameBindings = frame.bindingSet(gpu, ctx->frameLayout(), ctx->samplers());
+
+    nvrhi::TextureDesc depthDesc;
+    depthDesc.width = kWidth;
+    depthDesc.height = kHeight;
+    depthDesc.format = nvrhi::Format::R32_FLOAT;
+    depthDesc.isShaderResource = true;
+    depthDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+    depthDesc.keepInitialState = true;
+    depthDesc.debugName = "TestSlotDepth";
+    nvrhi::TextureHandle depthTex = gpu->createTexture(depthDesc);
+    ASSERT_TRUE(depthTex);
+    const std::uint32_t depthBindless = ctx->bindless().registerTexture(depthTex);
+
+    ctx->upload([&](nvrhi::ICommandList* cmd) {
+        cmd->writeTexture(depthTex, 0, 0, prevDepth.data(), kWidth * sizeof(float));
+        culler.uploadInstances(cmd, instances);
+        culler.buildHiZ(cmd, frameBindings, depthTex, depthBindless, kWidth, kHeight);
+        culler.dispatchPhase1(cmd, frameBindings, vp, static_cast<std::uint32_t>(instances.size()), true);
+    });
+    gpu->waitForIdle();
+
+    const auto vis1 = readBufferVec<std::uint32_t>(*ctx, culler.visibilityBuffer(), instances.size());
+    const auto p1Slots = readBufferVec<DrawIndexedIndirectCommand>(*ctx, culler.phase1SlotIndirectBuffer(), instances.size());
+    const auto fSlots1 = readBufferVec<DrawIndexedIndirectCommand>(*ctx, culler.finalSlotIndirectBuffer(), instances.size());
+    EXPECT_EQ(vis1[0], kCullVisibilityOccluded);
+    EXPECT_EQ(vis1[1], kCullVisibilityPhase1);
+    EXPECT_EQ(vis1[2], kCullVisibilityCulled);
+    EXPECT_EQ(vis1[3], kCullVisibilityPhase1);
+    EXPECT_EQ(p1Slots[0].instanceCount, 0u);
+    EXPECT_EQ(p1Slots[1].instanceCount, 1u);
+    EXPECT_EQ(p1Slots[2].instanceCount, 0u);
+    EXPECT_EQ(p1Slots[3].instanceCount, 3u);
+    for (std::size_t i = 0; i < instances.size(); ++i) {
+        EXPECT_EQ(fSlots1[i].instanceCount, p1Slots[i].instanceCount);
+        EXPECT_EQ(p1Slots[i].firstInstance, 0u);
+    }
+
+    ctx->upload([&](nvrhi::ICommandList* cmd) {
+        cmd->writeTexture(depthTex, 0, 0, currDepth.data(), kWidth * sizeof(float));
+        culler.buildHiZ(cmd, frameBindings, depthTex, depthBindless, kWidth, kHeight);
+        culler.dispatchPhase2(cmd, frameBindings, vp, static_cast<std::uint32_t>(instances.size()));
+    });
+    gpu->waitForIdle();
+
+    const auto vis2 = readBufferVec<std::uint32_t>(*ctx, culler.visibilityBuffer(), instances.size());
+    const auto p2Slots = readBufferVec<DrawIndexedIndirectCommand>(*ctx, culler.phase2SlotIndirectBuffer(), instances.size());
+    const auto fSlots2 = readBufferVec<DrawIndexedIndirectCommand>(*ctx, culler.finalSlotIndirectBuffer(), instances.size());
+    EXPECT_EQ(vis2[0], kCullVisibilityPhase2);
+    EXPECT_EQ(vis2[1], kCullVisibilityPhase1);
+    EXPECT_EQ(vis2[2], kCullVisibilityCulled);
+    EXPECT_EQ(vis2[3], kCullVisibilityPhase1);
+    EXPECT_EQ(p2Slots[0].instanceCount, 1u);
+    EXPECT_EQ(p2Slots[1].instanceCount, 0u);
+    EXPECT_EQ(p2Slots[2].instanceCount, 0u);
+    EXPECT_EQ(p2Slots[3].instanceCount, 0u);
+    EXPECT_EQ(fSlots2[0].instanceCount, 1u);
+    EXPECT_EQ(fSlots2[1].instanceCount, 1u);
+    EXPECT_EQ(fSlots2[2].instanceCount, 0u);
+    EXPECT_EQ(fSlots2[3].instanceCount, 3u);
+
+    ctx->bindless().releaseTexture(depthBindless);
+}

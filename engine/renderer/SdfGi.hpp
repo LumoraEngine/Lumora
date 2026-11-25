@@ -127,6 +127,9 @@ void injectDirectLightingToSurfels(SdfVolumeData& volume, const glm::vec3& sunDi
                                    std::span<const GpuLight> localLights = {},
                                    const glm::vec3& ambientColor = glm::vec3(0.0f));
 
+/// Extracts directional, point, and spot lights from `scene` and injects their direct lighting into `volume`.
+void injectSceneLightsToSurfels(const Scene& scene, SdfVolumeData& volume);
+
 /// Propagates indirect light through the surfel cache for multi-bounce global illumination on CPU.
 void propagateSdfMultiBounce(SdfVolumeData& volume, std::uint32_t bounces = 1u, std::uint32_t raysPerVoxel = 8u);
 

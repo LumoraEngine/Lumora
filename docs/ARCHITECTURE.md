@@ -175,21 +175,32 @@ async-compute scheduling.
 
 ### AAA GPU passes (`SceneRenderer` opt-in)
 
-`RenderSettings` exposes three opt-in compute pipelines wired into `SceneRenderer`
-(`SceneRenderer.cpp`, `SceneRendererSurfaces.cpp`) without altering default rendering when disabled:
+`RenderSettings` exposes three opt-in compute pipelines wired end-to-end into `SceneRenderer`
+(`SceneRenderer.cpp`, `SceneRendererLights.cpp`, `SceneRendererSurfaces.cpp`) without altering
+default rendering when disabled:
 
 - **Two-phase Hi-Z GPU occlusion culling** (`engine/renderer/GpuCulling.hpp`, `GpuCulling.cpp`,
   `shaders/hiz_build.hlsl`, `shaders/gpu_cull.hlsl`): `GpuOcclusionCuller` builds a reversed-Z
-  min-depth Hi-Z pyramid (`CSMain`) and compacts indirect draws in two phases (`CSPhase1` using
-  the previous frame's Hi-Z, `CSPhase2` re-testing disoccluded instances against current-frame Hi-Z).
+  min-depth Hi-Z pyramid (`CSMain`) and fills per-slot indirect draw argument buffers
+  (`phase1SlotIndirectBuffer_`, `phase2SlotIndirectBuffer_`, `finalSlotIndirectBuffer_`) in two
+  phases: `CSPhase1` reprojects instances against the previous frame's view-projection Hi-Z while
+  culling against current frustum planes, driving indirect `DepthPrepass`; `CSPhase2` re-tests
+  occluded instances against updated current-frame Hi-Z for indirect `DepthPrepassPhase2` and
+  produces `finalSlotIndirectBuffer_` for indirect `Opaque` rendering.
 - **SDF ray-traced global illumination** (`engine/renderer/SdfGi.hpp`, `SdfGi.cpp`,
-  `shaders/rtgi_sdf.hlsl`): `SdfGiPass` voxelizes proxy AABBs into 3D `R16_FLOAT` distance and
-  `RGBA16_FLOAT` surfel caches (`buildSdfVolumeFromScene`, `injectDirectLightingToSurfels`,
-  `propagateSdfMultiBounce`) and dispatches sphere-traced diffuse GI (`CSMain`).
+  `shaders/rtgi_sdf.hlsl`, `shaders/lighting.hlsli`, `shaders/mesh.hlsl`): `SdfGiPass` voxelizes
+  real mesh bounds and `.lmat` material albedo/emission into 3D `R16_FLOAT` distance and
+  `RGBA16_FLOAT` surfel caches, injects scene lights (`injectSceneLightsToSurfels`), propagates
+  multi-bounce surfel radiance (`propagateSdfMultiBounce`), dispatches sphere-traced diffuse GI
+  (`CSMain`), and feeds the resulting diffuse irradiance directly into `Opaque` ambient shading.
 - **ReSTIR DI** (`engine/renderer/RestirLighting.hpp`, `RestirLighting.cpp`,
-  `shaders/restir_di.hlsl`): `RestirPass` runs spatio-temporal reservoir resampling over 16-byte
-  `GpuReservoir` ping-pong `RGBA32_UINT` targets (`CSInitialTemporal` + `CSSpatialResolve` with
-  depth/normal edge-stopping and `maxTemporalM` clamping).
+  `shaders/restir_di.hlsl`, `shaders/restir_spatial.hlsl`, `shaders/mesh_restir.hlsl`,
+  `shaders/restir_composite.hlsl`): when enabled, `Opaque` outputs an extra `SV_Target3`
+  albedo/metallic G-buffer and skips the Forward+ local-light loop; `RestirPass` runs
+  spatio-temporal reservoir resampling over 16-byte `GpuReservoir` ping-pong `RGBA32_UINT` targets
+  (`CSInitialTemporal` in `restir_di.hlsl` + GGX/Burley PBR & local shadow-atlas `CSSpatialResolve`
+  in `restir_spatial.hlsl` with depth/normal edge-stopping and `maxTemporalM` clamping) and
+  composites HDR direct lighting with fog transmittance (`restir_composite.hlsl`).
 
 ### Uploads
 
@@ -269,7 +280,11 @@ Command recording is already spread over the job system for large passes (`recor
   FNV-1a content hashes for incremental cooking (`cookStaleMeshes`).
 - The renderer's `MeshCache` and `TextureCache` upload on first use (non-blocking timeline
   uploads; textures get a full blit-generated mip chain, sRGB views for colour maps) and key
-  GPU data by absolute path, so projects never collide.
+  GPU data by absolute path, so projects never collide. Disk-backed CPU mip chains in
+  `TextureCache` are automatically released from RAM after `setRamReleaseIdleFrames` idle
+  frames (default 60), retaining lightweight per-level byte metadata for VRAM budgeting,
+  reloaded asynchronously from disk via `JobSystem` when finer mips are needed, and reported
+  through `cpuCacheBytes` in `TextureCache::Stats`.
 - JSON numbers are parsed locale-independently. Qt switches `LC_NUMERIC` to the user's locale,
   and cgltf's default `atof` read `0.01` as `0` under pl_PL; a regression test covers this.
 
@@ -357,7 +372,9 @@ step in `NetSession::endStep`).
     second `wl_pointer` that tracks which surface has the pointer, live on a private event queue
     dispatched only on the UI thread, so Qt's own Wayland objects are untouched.
 - `ViewportClient` is the seam between a viewport and its owner (`EditorViewportClient`,
-  `PlayerWindow`).
+  `PlayerWindow`). `EditorWindow` exposes checkable `View > Rendering` toggles (`SSR`,
+  `Hi-Z Cull`, `SDF GI`, `ReSTIR DI`) persisted via `QSettings` on `EditorViewportClient`, while
+  `ProfilerPanel` displays the currently active AAA rendering features alongside frame timing.
 - `EditorContext` holds the active scene, the selection, the undo stack, mutation entry points
   and change signals. Panels never modify the scene behind each other's backs.
 - **Undo/redo** (`QUndoStack`): structural edits record the scene before and after and apply the

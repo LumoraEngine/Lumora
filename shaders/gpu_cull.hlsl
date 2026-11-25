@@ -26,6 +26,7 @@ static const uint CULL_FLAG_OCCLUSION = 2u;
 static const uint CULL_FLAG_HIZ_VALID = 4u;
 
 static const uint CULL_INSTANCE_SKIP_OCCLUSION = 1u;
+static const uint CULL_INSTANCE_SKIP_FRUSTUM = 2u;
 
 struct CullInstance {
     float3 aabbCenter;
@@ -66,15 +67,17 @@ struct CullConstants {
 [[vk::binding(2, 1)]] RWStructuredBuffer<DrawIndexedIndirectCommand> gIndirectDraws DX_REGISTER_SPACE(u2, space1);
 [[vk::binding(3, 1)]] RWStructuredBuffer<uint> gVisibilityMask DX_REGISTER_SPACE(u3, space1);
 [[vk::binding(4, 1)]] RWStructuredBuffer<uint> gDrawCount DX_REGISTER_SPACE(u4, space1);
+[[vk::binding(5, 1)]] RWStructuredBuffer<DrawIndexedIndirectCommand> gSlotIndirect DX_REGISTER_SPACE(u5, space1);
+[[vk::binding(6, 1)]] RWStructuredBuffer<DrawIndexedIndirectCommand> gFinalSlotIndirect DX_REGISTER_SPACE(u6, space1);
 
-bool testFrustumAabb(float3 center, float3 extents) {
-    if ((gCull.flags & CULL_FLAG_FRUSTUM) == 0u) {
+bool testFrustumAabb(CullInstance inst) {
+    if ((gCull.flags & CULL_FLAG_FRUSTUM) == 0u || (inst.flags & CULL_INSTANCE_SKIP_FRUSTUM) != 0u) {
         return true;
     }
     [unroll] for (int i = 0; i < 6; ++i) {
         float4 plane = gCull.frustumPlanes[i];
-        float dist = dot(plane.xyz, center) + plane.w;
-        float radius = dot(abs(plane.xyz), extents);
+        float dist = dot(plane.xyz, inst.aabbCenter) + plane.w;
+        float radius = dot(abs(plane.xyz), inst.aabbExtents);
         if (dist < -radius) {
             return false;
         }
@@ -158,12 +161,26 @@ bool testHiZAabb(CullInstance inst) {
     return true;
 }
 
+uint instanceCountFor(CullInstance inst) {
+    return inst.reserved > 0u ? inst.reserved : 1u;
+}
+
+void writeSlotIndirect(RWStructuredBuffer<DrawIndexedIndirectCommand> buf, uint slot, CullInstance inst, uint count) {
+    DrawIndexedIndirectCommand cmd;
+    cmd.indexCount = inst.indexCount;
+    cmd.instanceCount = count;
+    cmd.firstIndex = inst.firstIndex;
+    cmd.vertexOffset = inst.vertexOffset;
+    cmd.firstInstance = 0u;
+    buf[slot] = cmd;
+}
+
 void emitIndirectDraw(CullInstance inst) {
     uint slot = 0u;
     InterlockedAdd(gDrawCount[0], 1u, slot);
     DrawIndexedIndirectCommand cmd;
     cmd.indexCount = inst.indexCount;
-    cmd.instanceCount = 1u;
+    cmd.instanceCount = instanceCountFor(inst);
     cmd.firstIndex = inst.firstIndex;
     cmd.vertexOffset = inst.vertexOffset;
     cmd.firstInstance = inst.objectIndex;
@@ -177,15 +194,22 @@ void CSPhase1(uint3 id : SV_DispatchThreadID) {
         return;
     }
     const CullInstance inst = gCullInstances[idx];
-    if (!testFrustumAabb(inst.aabbCenter, inst.aabbExtents)) {
+    const uint instCount = instanceCountFor(inst);
+    if (!testFrustumAabb(inst)) {
         gVisibilityMask[idx] = CULL_VIS_CULLED;
+        writeSlotIndirect(gSlotIndirect, idx, inst, 0u);
+        writeSlotIndirect(gFinalSlotIndirect, idx, inst, 0u);
         return;
     }
     if (!testHiZAabb(inst)) {
         gVisibilityMask[idx] = CULL_VIS_OCCLUDED;
+        writeSlotIndirect(gSlotIndirect, idx, inst, 0u);
+        writeSlotIndirect(gFinalSlotIndirect, idx, inst, 0u);
         return;
     }
     gVisibilityMask[idx] = CULL_VIS_PHASE1;
+    writeSlotIndirect(gSlotIndirect, idx, inst, instCount);
+    writeSlotIndirect(gFinalSlotIndirect, idx, inst, instCount);
     emitIndirectDraw(inst);
 }
 
@@ -195,17 +219,25 @@ void CSPhase2(uint3 id : SV_DispatchThreadID) {
     if (idx >= gCull.instanceCount) {
         return;
     }
+    const CullInstance inst = gCullInstances[idx];
     if (gVisibilityMask[idx] != CULL_VIS_OCCLUDED) {
+        writeSlotIndirect(gSlotIndirect, idx, inst, 0u);
         return;
     }
-    const CullInstance inst = gCullInstances[idx];
-    if (!testFrustumAabb(inst.aabbCenter, inst.aabbExtents)) {
+    if (!testFrustumAabb(inst)) {
         gVisibilityMask[idx] = CULL_VIS_CULLED;
+        writeSlotIndirect(gSlotIndirect, idx, inst, 0u);
+        writeSlotIndirect(gFinalSlotIndirect, idx, inst, 0u);
         return;
     }
     if (!testHiZAabb(inst)) {
+        writeSlotIndirect(gSlotIndirect, idx, inst, 0u);
+        writeSlotIndirect(gFinalSlotIndirect, idx, inst, 0u);
         return;
     }
+    const uint instCount = instanceCountFor(inst);
     gVisibilityMask[idx] = CULL_VIS_PHASE2;
+    writeSlotIndirect(gSlotIndirect, idx, inst, instCount);
+    writeSlotIndirect(gFinalSlotIndirect, idx, inst, instCount);
     emitIndirectDraw(inst);
 }

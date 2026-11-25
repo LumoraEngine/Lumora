@@ -107,6 +107,7 @@ public:
     /// context's caches or the asset library they read (invalidating files, forgetting failures).
     [[nodiscard]] std::unique_lock<std::recursive_mutex> lock() const { return std::unique_lock(mutex_); }
     [[nodiscard]] RenderContext& context() noexcept { return ctx_; }
+    [[nodiscard]] const SceneRenderer& sceneRenderer() const noexcept { return sceneRenderer_; }
     void waitIdle();
     /// A file changed on disk: drops the GPU meshes and textures made from it (they upload
     /// again on next use). Waits for the GPU first.

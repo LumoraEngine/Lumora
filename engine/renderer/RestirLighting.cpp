@@ -453,6 +453,7 @@ void RestirPass::ensureResources(std::uint32_t width, std::uint32_t height) {
     hdrDesc.width = width;
     hdrDesc.height = height;
     hdrDesc.format = nvrhi::Format::RGBA16_FLOAT;
+    hdrDesc.isShaderResource = true;
     hdrDesc.isUAV = true;
     hdrDesc.debugName = "RestirDirectLighting";
     hdrDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
@@ -619,6 +620,7 @@ RGImage RestirPass::addPasses(RenderGraph& graph, const RestirGraphInputs& input
             b.sample(inputs.depth);
             b.sample(inputs.normalRoughness);
             if (inputs.albedo.valid()) b.sample(inputs.albedo);
+            if (inputs.localShadowAtlas.valid()) b.sample(inputs.localShadowAtlas);
         },
         [this, inputs, frame, groupsX, groupsY, bindlessTable](PassContext& ctx) {
             RestirDispatchParams dp;

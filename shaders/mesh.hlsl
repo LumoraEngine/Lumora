@@ -155,6 +155,9 @@ struct PSOutput {
     float4 color : SV_Target0;
     float4 normalRoughness : SV_Target1;  // world shading normal, perceptual roughness
     float4 specular : SV_Target2;         // weight of the environment's specular (see evaluateAmbient)
+#if defined(LUMORA_RESTIR)
+    float4 albedoMetallic : SV_Target3;   // linear surface albedo (rgb) * (1 - transmission), metallic (a)
+#endif
 };
 PSOutput PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) {
 #else
@@ -258,7 +261,12 @@ float4 PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) : SV_Target0 {
     s.transmission = transmissive ? saturate(object.transmission.x) * (1.0 - s.metallic) : 0.0;
 
     float3 specularWeight;
-    float3 color = evaluateAmbient(s, specularWeight);
+    bool hasSdfGi = (gPush.flags & 64u) != 0u && gFrame.volumeCount.z != 0u && gFrame.volumeCount.y != NO_TEXTURE;
+    float3 sdfIrradianceOverPi = 0.0.xxx;
+    if (hasSdfGi) {
+        sdfIrradianceOverPi = max(gTextures[gFrame.volumeCount.y].Load(int3(int2(input.position.xy), 0)).rgb, 0.0.xxx) / PI;
+    }
+    float3 color = evaluateAmbient(s, specularWeight, hasSdfGi, sdfIrradianceOverPi);
     float occlusion = 1.0;
     if (graphMaterial) {
         occlusion *= saturate(gGraph[GRAPH_OCCLUSION].x);
@@ -283,7 +291,7 @@ float4 PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) : SV_Target0 {
         }
         color += evaluateLight(s, -light.directionType.xyz, radiance);
     }
-    if (gFrame.lightGrid.w > 0u) {
+    if (gFrame.lightGrid.w > 0u && (gPush.flags & 32u) == 0u) {
         // Point lights binned into this pixel's screen tile.
         uint2 tile = min(uint2(input.position.xy) / gFrame.lightGrid.z, gFrame.lightGrid.xy - 1u);
         uint t = tile.y * gFrame.lightGrid.x + tile.x;
@@ -350,6 +358,9 @@ float4 PSMain(VSOutput input, bool frontFace : SV_IsFrontFace) : SV_Target0 {
     o.color = float4(color, 1.0);
     o.normalRoughness = float4(s.normal, s.roughness);
     o.specular = float4(specularWeight * occlusion, 1.0);
+#if defined(LUMORA_RESTIR)
+    o.albedoMetallic = float4(s.albedo * (1.0 - s.transmission), s.metallic);
+#endif
     return o;
 #else
     return float4(color, saturate(alpha));

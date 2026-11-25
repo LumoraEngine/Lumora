@@ -1,18 +1,24 @@
 // GPU integration tests: render real frames offscreen and inspect the pixels.
 // Skipped (not faked) when no Vulkan 1.4 device is available.
+#include "renderer/GpuCulling.hpp"
 #include "renderer/RenderContext.hpp"
 #include "renderer/Renderer.hpp"
 #include "renderer/Sprites.hpp"
+#include "renderer/TextureCache.hpp"
 #include "renderer/VirtualShadowMap.hpp"
 #include "scene/Scene.hpp"
 
+#include <glm/gtc/constants.hpp>
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <span>
+#include <thread>
 #include <vector>
 
 using namespace lumora;
@@ -3229,4 +3235,333 @@ TEST_F(RendererTest, CachedShadowPagesRedrawCutOutCastersOnceTheirMapLoads) {
     }
     EXPECT_LT(renderer_->stats().scene.virtualPagesRendered, renderer_->stats().scene.virtualPagesRequested) << "pages are cached";
     EXPECT_GT(darkness(*later), 0.85f) << "the map arrived: the cached pages show the holes";
+}
+
+namespace {
+
+void maybeDumpRenderPng(const char* filename, const CapturedImage& img) {
+    const char* dir = std::getenv("LUMORA_DUMP_AAA_RENDERS");
+    if (dir == nullptr || *dir == '\0') return;
+    const std::filesystem::path outDir(dir);
+    std::error_code ec;
+    std::filesystem::create_directories(outDir, ec);
+    (void)stbi_write_png((outDir / filename).string().c_str(), static_cast<int>(img.width), static_cast<int>(img.height), 4,
+                         img.rgba.data(), static_cast<int>(img.width * 4));
+}
+
+template <typename T>
+std::vector<T> readbackGpuBuffer(RenderContext& ctx, nvrhi::IBuffer* src, std::size_t count) {
+    std::vector<T> out(count);
+    if (src == nullptr || count == 0) return out;
+    nvrhi::BufferDesc desc;
+    desc.byteSize = count * sizeof(T);
+    desc.cpuAccess = nvrhi::CpuAccessMode::Read;
+    desc.debugName = "TestBufferReadback";
+    nvrhi::BufferHandle staging = ctx.gpu()->createBuffer(desc);
+    EXPECT_TRUE(staging != nullptr);
+    if (!staging) return out;
+    ctx.upload([&](nvrhi::ICommandList* cmd) {
+        cmd->copyBuffer(staging, 0, src, 0, count * sizeof(T));
+    });
+    ctx.gpu()->waitForIdle();
+    const void* mapped = ctx.gpu()->mapBuffer(staging, nvrhi::CpuAccessMode::Read);
+    EXPECT_NE(mapped, nullptr);
+    if (mapped != nullptr) {
+        std::memcpy(out.data(), mapped, count * sizeof(T));
+        ctx.gpu()->unmapBuffer(staging);
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_F(RendererTest, SdfGlobalIlluminationBleedsRedLightOntoWhiteSurface) {
+    auto scene = std::make_unique<Scene>("SdfGiCornell");
+    auto& env = scene->environment();
+    env.ambientIntensity = 0.05f;
+    env.fogDensity = 0.0f;
+    env.skyZenithColor = glm::vec3(0.08f, 0.1f, 0.14f);
+    env.skyHorizonColor = glm::vec3(0.12f, 0.14f, 0.18f);
+
+    // Sun shining towards -X and slightly -Y: hits the red wall's +X face directly while the
+    // white cube's -X face sits in self-shadow facing the sunlit red wall.
+    const auto sun = scene->createEntity("Sun");
+    scene->registry().get<TransformComponent>(sun).rotationDeg = {-20.0f, 90.0f, 0.0f};
+    auto& sunLight = scene->registry().emplace<LightComponent>(sun);
+    sunLight.type = LightType::Directional;
+    sunLight.color = {1.0f, 0.98f, 0.95f};
+    sunLight.intensity = 6.0f;
+
+    const auto floor = scene->createEntity("Floor");
+    auto& fm = scene->registry().emplace<MeshRendererComponent>(floor);
+    fm.mesh = MeshPrimitive::Plane;
+    fm.baseColor = {0.85f, 0.85f, 0.85f};
+    fm.roughness = 0.95f;
+    scene->registry().get<TransformComponent>(floor).scale = {12.0f, 1.0f, 12.0f};
+
+    const auto redWall = scene->createEntity("RedWall");
+    auto& wm = scene->registry().emplace<MeshRendererComponent>(redWall);
+    wm.baseColor = {0.95f, 0.02f, 0.02f};
+    wm.roughness = 0.9f;
+    auto& wt = scene->registry().get<TransformComponent>(redWall);
+    wt.position = {-2.2f, 1.5f, 0.0f};
+    wt.scale = {0.4f, 3.0f, 4.5f};
+
+    const auto whiteCube = scene->createEntity("WhiteCube");
+    auto& cm = scene->registry().emplace<MeshRendererComponent>(whiteCube);
+    cm.baseColor = {0.9f, 0.9f, 0.9f};
+    cm.roughness = 0.9f;
+    auto& ct = scene->registry().get<TransformComponent>(whiteCube);
+    ct.position = {-0.1f, 1.0f, 0.0f};
+    ct.scale = {1.4f, 2.0f, 2.0f};
+    scene->updateWorldTransforms();
+
+    const glm::uvec2 size(160, 120);
+    FlyCameraController cam;
+    cam.setPosition({-1.15f, 1.4f, 4.6f});
+    cam.lookAt({-0.9f, 1.0f, 0.0f});
+    const CameraView view = cam.view(static_cast<float>(size.x) / static_cast<float>(size.y));
+
+    RenderSettings off;
+    off.bloom = false;
+    off.ambientOcclusion = false;
+    off.sdfGlobalIllumination = false;
+    auto withoutGi = renderer_->capture(*scene, view, {size.x, size.y}, off);
+    ASSERT_TRUE(withoutGi.has_value()) << withoutGi.error().message;
+    EXPECT_FALSE(renderer_->stats().scene.sdfGlobalIllumination);
+    maybeDumpRenderPng("sdf_gi_off.png", *withoutGi);
+
+    RenderSettings on = off;
+    on.sdfGlobalIllumination = true;
+    auto withGi = renderer_->capture(*scene, view, {size.x, size.y}, on);
+    ASSERT_TRUE(withGi.has_value()) << withGi.error().message;
+    EXPECT_TRUE(renderer_->stats().scene.sdfGlobalIllumination);
+    maybeDumpRenderPng("sdf_gi_on.png", *withGi);
+
+    // Sample on the shadowed -X face of the white cube facing the sunlit red wall.
+    const glm::ivec2 bounceSpot = toPixel(view, {-0.8f, 1.0f, 0.0f}, size);
+    ASSERT_TRUE(bounceSpot.x >= 0 && bounceSpot.y >= 0 && bounceSpot.x < static_cast<int>(size.x) &&
+                bounceSpot.y < static_cast<int>(size.y));
+    const auto pOff = pixel(*withoutGi, bounceSpot.x, bounceSpot.y);
+    const auto pOn = pixel(*withGi, bounceSpot.x, bounceSpot.y);
+    const int warmthOff = static_cast<int>(pOff.r) - static_cast<int>(pOff.b);
+    const int warmthOn = static_cast<int>(pOn.r) - static_cast<int>(pOn.b);
+    EXPECT_GT(warmthOn, warmthOff + 15) << "withoutGi=(" << int(pOff.r) << "," << int(pOff.g) << "," << int(pOff.b)
+                                        << ") withGi=(" << int(pOn.r) << "," << int(pOn.g) << "," << int(pOn.b) << ")";
+}
+
+TEST_F(RendererTest, RestirDirectLightingIlluminatesSceneWithManyPointLights) {
+    auto scene = std::make_unique<Scene>("RestirLights");
+    auto& env = scene->environment();
+    env.skyZenithColor = env.skyHorizonColor = env.groundColor = glm::vec3(0.0f);
+    env.ambientIntensity = 0.0f;
+    env.fogDensity = 0.0f;
+
+    const auto floor = scene->createEntity("Floor");
+    auto& fm = scene->registry().emplace<MeshRendererComponent>(floor);
+    fm.mesh = MeshPrimitive::Plane;
+    fm.baseColor = {0.85f, 0.85f, 0.85f};
+    fm.roughness = 0.6f;
+    scene->registry().get<TransformComponent>(floor).scale = {20.0f, 1.0f, 20.0f};
+
+    const auto centerBox = scene->createEntity("CenterBox");
+    auto& cm = scene->registry().emplace<MeshRendererComponent>(centerBox);
+    cm.baseColor = {0.85f, 0.85f, 0.85f};
+    cm.metallic = 0.4f;
+    cm.roughness = 0.35f;
+    auto& ct = scene->registry().get<TransformComponent>(centerBox);
+    ct.position = {0.0f, 0.7f, 0.0f};
+    ct.scale = {1.4f, 1.4f, 1.4f};
+
+    constexpr int kLightCount = 24;
+    for (int i = 0; i < kLightCount; ++i) {
+        const float angle = (static_cast<float>(i) / static_cast<float>(kLightCount)) * glm::two_pi<float>();
+        const float radius = (i % 2 == 0) ? 3.2f : 5.0f;
+        const auto lamp = scene->createEntity("PointLight" + std::to_string(i));
+        auto& lc = scene->registry().emplace<LightComponent>(lamp);
+        lc.type = LightType::Point;
+        lc.color = {1.0f, 0.45f, 0.12f};
+        lc.intensity = 3.5f;
+        lc.range = 10.0f;
+        lc.castShadows = false;
+        scene->registry().get<TransformComponent>(lamp).position = {std::cos(angle) * radius, 2.2f,
+                                                                  std::sin(angle) * radius};
+    }
+    scene->updateWorldTransforms();
+
+    const glm::uvec2 size(160, 120);
+    FlyCameraController cam;
+    cam.setPosition({0.0f, 4.0f, 7.0f});
+    cam.lookAt({0.0f, 0.5f, 0.0f});
+    const CameraView view = cam.view(static_cast<float>(size.x) / static_cast<float>(size.y));
+
+    RenderSettings forwardSettings;
+    forwardSettings.bloom = false;
+    forwardSettings.ambientOcclusion = false;
+    forwardSettings.restirDirectLighting = false;
+    auto forwardImg = renderer_->capture(*scene, view, {size.x, size.y}, forwardSettings);
+    ASSERT_TRUE(forwardImg.has_value()) << forwardImg.error().message;
+    EXPECT_FALSE(renderer_->stats().scene.restirDirectLighting);
+    maybeDumpRenderPng("restir_forward_ref.png", *forwardImg);
+
+    RenderSettings restirSettings = forwardSettings;
+    restirSettings.restirDirectLighting = true;
+    std::optional<CapturedImage> restirImg;
+    for (int frame = 0; frame < 3; ++frame) {
+        restirImg = *renderer_->capture(*scene, view, {size.x, size.y}, restirSettings);
+        EXPECT_TRUE(renderer_->stats().scene.restirDirectLighting);
+    }
+    ASSERT_TRUE(restirImg.has_value());
+    maybeDumpRenderPng("restir_di_frame3.png", *restirImg);
+
+    auto meanLuma = [](const CapturedImage& img) {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < img.rgba.size(); i += 4) {
+            sum += 0.2126 * img.rgba[i] + 0.7152 * img.rgba[i + 1] + 0.0722 * img.rgba[i + 2];
+        }
+        return sum / static_cast<double>(img.width * img.height);
+    };
+    const double lumaForward = meanLuma(*forwardImg);
+    const double lumaRestir = meanLuma(*restirImg);
+    EXPECT_GT(lumaForward, 15.0);
+    EXPECT_GT(lumaRestir, lumaForward * 0.45);
+    EXPECT_LT(lumaRestir, lumaForward * 2.0);
+
+    const glm::ivec2 boxPixel = toPixel(view, {0.0f, 0.8f, 0.7f}, size);
+    const auto pBox = pixel(*restirImg, boxPixel.x, boxPixel.y);
+    EXPECT_GT(static_cast<int>(pBox.r), static_cast<int>(pBox.b) + 20)
+        << "warm point lights should illuminate center box via ReSTIR PBR";
+}
+
+TEST_F(RendererTest, GpuOcclusionCullingSkipsOccludedObjectsAndDisoccludesCleanly) {
+    auto scene = sceneWithSun();
+    scene->environment().fogDensity = 0.0f;
+
+    const auto wall = scene->createEntity("OccluderWall");
+    auto& wm = scene->registry().emplace<MeshRendererComponent>(wall);
+    wm.baseColor = {0.25f, 0.35f, 0.7f};
+    wm.roughness = 0.8f;
+    auto& wt = scene->registry().get<TransformComponent>(wall);
+    wt.position = {0.0f, 0.0f, 1.5f};
+    wt.scale = {4.0f, 4.0f, 0.4f};
+
+    const auto targetCube = scene->createEntity("TargetSphere");
+    auto& tm = scene->registry().emplace<MeshRendererComponent>(targetCube);
+    tm.mesh = MeshPrimitive::Sphere;
+    tm.baseColor = {1.0f, 0.05f, 0.05f};
+    tm.emissive = {1.0f, 0.05f, 0.05f};
+    tm.emissiveStrength = 2.5f;
+    auto& tt = scene->registry().get<TransformComponent>(targetCube);
+    tt.position = {0.0f, 0.0f, -2.0f};
+    tt.scale = {1.2f, 1.2f, 1.2f};
+    scene->updateWorldTransforms();
+
+    const glm::uvec2 size(128, 96);
+    FlyCameraController cam;
+    cam.setPosition({0.0f, 0.0f, 6.0f});
+    cam.lookAt({0.0f, 0.0f, 0.0f});
+    const CameraView view = cam.view(static_cast<float>(size.x) / static_cast<float>(size.y));
+
+    RenderSettings refSettings;
+    refSettings.bloom = false;
+    refSettings.gpuOcclusionCulling = false;
+    auto refOccluded = renderer_->capture(*scene, view, {size.x, size.y}, refSettings);
+    ASSERT_TRUE(refOccluded.has_value());
+
+    RenderSettings cullSettings = refSettings;
+    cullSettings.gpuOcclusionCulling = true;
+    auto frame1 = renderer_->capture(*scene, view, {size.x, size.y}, cullSettings);
+    ASSERT_TRUE(frame1.has_value());
+    EXPECT_TRUE(renderer_->stats().scene.gpuOcclusionCulling);
+
+    auto frame2 = renderer_->capture(*scene, view, {size.x, size.y}, cullSettings);
+    ASSERT_TRUE(frame2.has_value());
+    EXPECT_TRUE(renderer_->stats().scene.gpuOcclusionCulling);
+    maybeDumpRenderPng("hiz_frame2_occluded.png", *frame2);
+
+    const auto cRef = pixel(*refOccluded, size.x / 2, size.y / 2);
+    const auto c2 = pixel(*frame2, size.x / 2, size.y / 2);
+    EXPECT_NEAR(static_cast<int>(c2.r), static_cast<int>(cRef.r), 6);
+    EXPECT_NEAR(static_cast<int>(c2.g), static_cast<int>(cRef.g), 6);
+    EXPECT_NEAR(static_cast<int>(c2.b), static_cast<int>(cRef.b), 6);
+
+    const GpuOcclusionCuller* culler = renderer_->sceneRenderer().gpuCulling();
+    ASSERT_NE(culler, nullptr);
+    const auto vis2 = readbackGpuBuffer<std::uint32_t>(*context_, culler->visibilityBuffer(), 2u);
+    const auto ind2 = readbackGpuBuffer<DrawIndexedIndirectCommand>(*context_, culler->finalSlotIndirectBuffer(), 2u);
+    const std::size_t occludedIdx = vis2[0] == kCullVisibilityOccluded ? 0u : 1u;
+    EXPECT_EQ(vis2[occludedIdx], kCullVisibilityOccluded) << "target cube must be occluded behind wall on frame 2";
+    EXPECT_EQ(ind2[occludedIdx].instanceCount, 0u) << "occluded draw slot must emit 0 instances";
+    EXPECT_EQ(ind2[1u - occludedIdx].instanceCount, 1u);
+
+    // Slide the occluder wall to the right (still inside the frustum, clearing the center sphere):
+    // Phase 2 must immediately disocclude the red sphere on Frame 3!
+    wt.position = {3.2f, 0.0f, 1.5f};
+    scene->updateWorldTransforms();
+    auto frame3 = renderer_->capture(*scene, view, {size.x, size.y}, cullSettings);
+    ASSERT_TRUE(frame3.has_value());
+    maybeDumpRenderPng("hiz_frame3_disoccluded.png", *frame3);
+
+    const auto c3 = pixel(*frame3, size.x / 2, size.y / 2);
+    EXPECT_GT(static_cast<int>(c3.r), static_cast<int>(c3.b) + 80) << "red sphere must disocclude immediately on frame 3";
+
+    const auto vis3 = readbackGpuBuffer<std::uint32_t>(*context_, culler->visibilityBuffer(), 2u);
+    const auto ind3 = readbackGpuBuffer<DrawIndexedIndirectCommand>(*context_, culler->finalSlotIndirectBuffer(), 2u);
+    EXPECT_TRUE(vis3[0] == kCullVisibilityPhase2 || vis3[1] == kCullVisibilityPhase2);
+    for (const auto& cmd : ind3) {
+        if (cmd.indexCount > 0u) EXPECT_EQ(cmd.instanceCount, 1u);
+    }
+}
+
+TEST_F(RendererTest, TextureCacheReleasesCpuRamAfterIdleAndReloadsOnDemand) {
+    if (!context_->caps().textureCompressionBC) GTEST_SKIP() << "no BC texture support";
+    test::TempDir project;
+    std::filesystem::create_directories(project.path() / "Content" / "Textures");
+    constexpr int kDim = 512;
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(kDim) * kDim * 3);
+    for (int y = 0; y < kDim; ++y) {
+        for (int x = 0; x < kDim; ++x) {
+            const std::size_t idx = (static_cast<std::size_t>(y) * kDim + x) * 3;
+            pixels[idx + 0] = static_cast<std::uint8_t>((x * 255) / kDim);
+            pixels[idx + 1] = static_cast<std::uint8_t>((y * 255) / kDim);
+            pixels[idx + 2] = 110;
+        }
+    }
+    const auto texPath = project.path() / "Content" / "Textures" / "stream.png";
+    ASSERT_NE(stbi_write_png(texPath.string().c_str(), kDim, kDim, 3, pixels.data(), kDim * 3), 0);
+
+    AssetLibrary assets(project.path());
+    TextureCache& cache = context_->textures();
+    cache.setRamReleaseIdleFrames(4);
+    for (int i = 0; i < 5; ++i) cache.beginFrame();
+    const auto baselineStats = cache.stats();
+
+    const std::uint32_t farIdx = cache.index(assets, "Content/Textures/stream.png", TextureKind::Color, true, 64.0f);
+    ASSERT_NE(farIdx, UINT32_MAX);
+    const auto initialStats = cache.stats();
+    EXPECT_GT(initialStats.residentBytes, 0u);
+    EXPECT_GT(initialStats.cpuCacheBytes, baselineStats.cpuCacheBytes);
+
+    for (int i = 0; i < 5; ++i) cache.beginFrame();
+    const auto releasedStats = cache.stats();
+    EXPECT_EQ(releasedStats.cpuCacheBytes, baselineStats.cpuCacheBytes)
+        << "idle disk-backed mip chain should be freed from RAM";
+    EXPECT_GT(releasedStats.residentBytes, 0u) << "GPU resident bytes remain tracked";
+
+    EXPECT_EQ(cache.index(assets, "Content/Textures/stream.png", TextureKind::Color, true, 4096.0f), farIdx);
+    bool streamed = false;
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        cache.beginFrame();
+        if (cache.stats().streamedIn > 0) {
+            streamed = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_TRUE(streamed) << "finer mip chain should reload asynchronously from disk and stream in";
+    EXPECT_GT(cache.stats().residentBytes, initialStats.residentBytes);
+
+    cache.setRamReleaseIdleFrames(60);
+    context_->gpu()->waitForIdle();
+    cache.invalidateFile(std::filesystem::weakly_canonical(texPath).generic_string());
 }
